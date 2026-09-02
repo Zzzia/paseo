@@ -11,6 +11,7 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const APP_DIR = path.join(REPO_ROOT, "packages", "app");
 const SOURCE_DIST = path.join(APP_DIR, "dist");
 const TARGET_DIST = path.join(REPO_ROOT, "packages", "server", "dist", "server", "web-ui");
+const KATEX_FONTS_SOURCE = path.join(REPO_ROOT, "node_modules", "katex", "dist", "fonts");
 const COMPRESS_EXTENSIONS = new Set([".html", ".js", ".css", ".json", ".svg", ".map"]);
 
 function fmtMiB(bytes) {
@@ -51,6 +52,28 @@ async function cleanTarget() {
 async function copyAssets() {
   console.log(`Copying assets to ${path.relative(REPO_ROOT, TARGET_DIST)}...`);
   await cp(SOURCE_DIST, TARGET_DIST, { recursive: true, force: true });
+}
+
+async function copyKatexFonts() {
+  const fontsStat = await stat(KATEX_FONTS_SOURCE).catch(() => null);
+  if (!fontsStat?.isDirectory()) {
+    throw new Error(`KaTeX fonts not found at ${KATEX_FONTS_SOURCE}`);
+  }
+
+  // Expo inlines katex.min.css but leaves its url("fonts/...") relative, so
+  // the files have to sit next to the hashed stylesheet.
+  const cssDir = path.join(TARGET_DIST, "_expo", "static", "css");
+  const cssEntries = await readdir(cssDir).catch(() => []);
+  const hasKatexCss = cssEntries.some(
+    (name) => name.startsWith("katex.min-") && name.endsWith(".css"),
+  );
+  if (!hasKatexCss) {
+    throw new Error(`KaTeX stylesheet missing from ${cssDir}`);
+  }
+
+  const fontsTarget = path.join(cssDir, "fonts");
+  console.log(`Copying KaTeX fonts to ${path.relative(REPO_ROOT, fontsTarget)}...`);
+  await cp(KATEX_FONTS_SOURCE, fontsTarget, { recursive: true, force: true });
 }
 
 async function compressFile(filePath) {
@@ -126,6 +149,7 @@ async function main() {
 
   await cleanTarget();
   await copyAssets();
+  await copyKatexFonts();
   await precompressAssets(TARGET_DIST);
 
   const sizes = await measureBundle(TARGET_DIST);

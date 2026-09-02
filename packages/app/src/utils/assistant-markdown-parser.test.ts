@@ -166,4 +166,18 @@ describe("createAssistantMarkdownParser", () => {
 
     expect(parser.render("[x](javascript:alert(1))")).not.toContain("href");
   });
+
+  it("tokenizes display math in assistant messages", () => {
+    const parser = createAssistantMarkdownParser();
+    const tokens = parser
+      .parse("$$z = \\sum_{i=1}^n w_i x_i + b$$", {})
+      .filter((token) => token.type.startsWith("math_"));
+
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      type: "math_block",
+      content: "z = \\sum_{i=1}^n w_i x_i + b",
+      markup: "$$",
+    });
+  });
 });
