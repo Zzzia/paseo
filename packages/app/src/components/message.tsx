@@ -68,6 +68,8 @@ import { useStableEvent } from "@/hooks/use-stable-event";
 import { HighlightedCodeBlock } from "@/components/highlighted-code-block";
 import { MarkdownFenceBlock } from "@/components/markdown/fence";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
+import { MathFormula } from "@/components/math-formula";
+import { getMathFormulaProps } from "@/utils/markdown-math";
 import { splitMarkdownBlocks } from "@/utils/split-markdown-blocks";
 import { useRevealedText } from "@/hooks/use-revealed-text";
 import { colorMarkdownLinkChildren } from "@/components/markdown/link-children";
@@ -1926,6 +1928,30 @@ export const AssistantMessage = memo(function AssistantMessage({
         >
           {colorMarkdownLinkChildren(children, styles.link.color)}
         </AssistantMarkdownLink>
+      ),
+      math_inline: (
+        node: ASTNode,
+        _children: ReactNode[],
+        _parent: ASTNode[],
+        styles: MarkdownStyles,
+      ) => (
+        <MathFormula
+          key={node.key}
+          {...getMathFormulaProps(node as AssistantMarkdownAstNode)}
+          textStyle={styles.text}
+        />
+      ),
+      math_block: (
+        node: ASTNode,
+        _children: ReactNode[],
+        _parent: ASTNode[],
+        styles: MarkdownStyles,
+      ) => (
+        <MathFormula
+          key={node.key}
+          {...getMathFormulaProps(node as AssistantMarkdownAstNode)}
+          textStyle={styles.text}
+        />
       ),
       image: (
         node: ASTNode,
