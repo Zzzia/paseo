@@ -156,6 +156,11 @@ The asymmetry is intentional: a subagent's persistent relationship lives in the 
 
 Agent lifecycle status stays literal: a parent agent is `idle` when its own turn is idle, even if a child is running.
 
+侧栏“最近”按工作区合并，最多展示 5 条；排序依据该工作区聊天的最后一次用户发送时间。
+回复、阅读和连接恢复也会改变活动时间，因此不能用活动时间代替发送时间。最近入口复用已有目录和缓存，
+无需升级服务端或新增持久化记录；点击会打开最后发送消息的聊天标签页。置顶工作区不重复展示，
+最近入口遵循侧栏已有筛选，同目录的不同工作区仍各自独立。
+
 Workspace status is an aggregate activity signal computed **per `workspaceId`**. Ownership is never derived from `cwd` — many workspaces may share one directory, and same-`cwd` siblings do not clump under one status. Root agents and cross-workspace subagents contribute their normal state bucket to their own workspace. Same-workspace descendants contribute `running` to the nearest ancestor in that workspace; their non-running attention, permission, and error states stay in the parent's subagents track. This makes a cross-workspace subagent behave like a detached agent for workspace visibility and status without removing its parent relationship.
 
 Running provider-native subagents contribute `running` to the workspace owned by their parent agent. Their completed, failed, and canceled states stay in the parent's subagents track.

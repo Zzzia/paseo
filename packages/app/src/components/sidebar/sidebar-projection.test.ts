@@ -5,6 +5,11 @@ import type {
   SidebarWorkspacePlacement,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { buildSidebarProjection } from "./sidebar-projection";
+import {
+  selectRecentSidebarSessions,
+  areRecentSidebarSessionsEqual,
+  type RecentSidebarAgent,
+} from "./sidebar-recent-sessions";
 
 function makeWorkspace(
   id: string,
@@ -172,5 +177,155 @@ describe("buildSidebarProjection", () => {
     expect(projection.shortcutModel.shortcutTargets).toEqual([
       { serverId: "srv", workspaceId: "unpinned" },
     ]);
+  });
+});
+
+function recentAgent(
+  id: string,
+  workspaceId: string,
+  lastSentAt: number | null,
+  overrides: Partial<RecentSidebarAgent> = {},
+): RecentSidebarAgent {
+  return {
+    id,
+    workspaceId,
+    parentAgentId: null,
+    archivedAt: null,
+    provider: "codex",
+    lastUserMessageAt: lastSentAt === null ? null : new Date(lastSentAt),
+    ...overrides,
+  };
+}
+
+describe("最近会话", () => {
+  it("按最后发送时间排序，同一工作区只占一条，最多显示五条", () => {
+    const workspaces = Array.from({ length: 7 }, (_, index) => makeWorkspace(`workspace-${index}`));
+    const agents = Array.from({ length: 7 }, (_, index) =>
+      recentAgent(`chat-${index}`, `workspace-${index}`, index),
+    );
+    agents.push(recentAgent("latest-tab", "workspace-6", 8));
+    const recent = selectRecentSidebarSessions({
+      projects: [makeProject(workspaces.map((workspace) => workspace.placement))],
+      pinnedWorkspaceKeys: [],
+      sessions: { srv: { agents: new Map(agents.map((agent) => [agent.id, agent])) } },
+    });
+
+    expect(recent.map((session) => session.agentId)).toEqual([
+      "latest-tab",
+      "chat-5",
+      "chat-4",
+      "chat-3",
+      "chat-2",
+    ]);
+    expect(recent.map((session) => session.workspace.workspaceId)).toEqual([
+      "workspace-6",
+      "workspace-5",
+      "workspace-4",
+      "workspace-3",
+      "workspace-2",
+    ]);
+  });
+
+  it("排除未发送、归档、置顶和不在当前筛选中的工作区", () => {
+    const workspaces = ["visible", "pinned", "archived", "draft"].map((id) => makeWorkspace(id));
+    const agents = [
+      recentAgent("visible-chat", "visible", 0),
+      recentAgent("pinned-chat", "pinned", 9),
+      recentAgent("archived-chat", "archived", 8, { archivedAt: new Date(10) }),
+      recentAgent("draft-chat", "draft", null),
+      recentAgent("filtered-chat", "filtered-out", 7),
+      recentAgent("detached", "missing-workspace", 6),
+    ];
+    const recent = selectRecentSidebarSessions({
+      projects: [makeProject(workspaces.map((workspace) => workspace.placement))],
+      pinnedWorkspaceKeys: ["srv:pinned"],
+      sessions: { srv: { agents: new Map(agents.map((agent) => [agent.id, agent])) } },
+    });
+    expect(recent.map((session) => session.agentId)).toEqual(["visible-chat"]);
+    expect(recent[0]?.lastSentAt).toBe(0);
+  });
+
+  it("同一工作区的后台子代理不改变顺序，跨工作区的子代理只影响自身工作区", () => {
+    const first = makeWorkspace("first");
+    const second = makeWorkspace("second");
+    const agents = [
+      recentAgent("parent", "first", 1),
+      recentAgent("same-workspace-child", "first", 9, { parentAgentId: "parent" }),
+      recentAgent("cross-workspace-child", "second", 2, { parentAgentId: "parent" }),
+    ];
+    const recent = selectRecentSidebarSessions({
+      projects: [makeProject([first.placement, second.placement])],
+      pinnedWorkspaceKeys: [],
+      sessions: { srv: { agents: new Map(agents.map((agent) => [agent.id, agent])) } },
+    });
+    expect(recent.map((session) => session.agentId)).toEqual(["cross-workspace-child", "parent"]);
+  });
+
+  it("不同主机上的同名工作区和聊天保持独立，重新发送会移动到第一条", () => {
+    const first = makeWorkspace("shared").placement;
+    const second = { ...first, serverId: "other-host", workspaceKey: "other-host:shared" };
+    const agent = recentAgent("same-chat-id", "shared", 1);
+    const input = {
+      projects: [makeProject([first, second])],
+      pinnedWorkspaceKeys: [],
+      sessions: {
+        srv: { agents: new Map([[agent.id, agent]]) },
+        "other-host": {
+          agents: new Map([[agent.id, { ...agent, lastUserMessageAt: new Date(2) }]]),
+        },
+      },
+    };
+    expect(selectRecentSidebarSessions(input).map((session) => session.serverId)).toEqual([
+      "other-host",
+      "srv",
+    ]);
+    input.sessions.srv.agents.set(agent.id, { ...agent, lastUserMessageAt: new Date(3) });
+    expect(selectRecentSidebarSessions(input).map((session) => session.serverId)).toEqual([
+      "srv",
+      "other-host",
+    ]);
+  });
+
+  it("回复和活动时间变化不改变最近入口，新的发送与最新标签页会更新入口", () => {
+    const workspace = makeWorkspace("shared").placement;
+    const agent = {
+      ...recentAgent("chat", "shared", 1),
+      updatedAt: new Date(2),
+      lastActivityAt: new Date(2),
+    };
+    const input = {
+      projects: [makeProject([workspace])],
+      pinnedWorkspaceKeys: [],
+      sessions: { srv: { agents: new Map([[agent.id, agent]]) } },
+    };
+    const before = selectRecentSidebarSessions(input);
+    input.sessions.srv.agents.set(agent.id, {
+      ...agent,
+      updatedAt: new Date(20),
+      lastActivityAt: new Date(20),
+    });
+    const afterReply = selectRecentSidebarSessions(input);
+    expect(areRecentSidebarSessionsEqual(before, afterReply)).toBe(true);
+    input.sessions.srv.agents.set(agent.id, { ...agent, lastUserMessageAt: new Date(21) });
+    expect(areRecentSidebarSessionsEqual(before, selectRecentSidebarSessions(input))).toBe(false);
+  });
+
+  it("没有目录或记录时为空，同一发送时间的顺序不受目录插入顺序影响", () => {
+    const workspace = makeWorkspace("shared").placement;
+    const first = recentAgent("a", "shared", 1);
+    const second = recentAgent("b", "shared", 1);
+    const input = { projects: [makeProject([workspace])], pinnedWorkspaceKeys: [] };
+    expect(selectRecentSidebarSessions({ ...input, sessions: {} })).toEqual([]);
+    for (const agents of [
+      [first, second],
+      [second, first],
+    ]) {
+      expect(
+        selectRecentSidebarSessions({
+          ...input,
+          sessions: { srv: { agents: new Map(agents.map((agent) => [agent.id, agent])) } },
+        }).map((session) => session.agentId),
+      ).toEqual(["a"]);
+    }
   });
 });

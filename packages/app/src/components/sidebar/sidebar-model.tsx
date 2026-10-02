@@ -6,6 +6,8 @@ import {
   type SidebarWorkspacesListResult,
 } from "@/hooks/use-sidebar-workspaces-list";
 import { useSidebarWorkspaceEntries } from "@/hooks/use-sidebar-workspace-entries";
+import { useRecentSidebarSessions } from "@/hooks/use-recent-sidebar-sessions";
+import type { SidebarRecentSession } from "./sidebar-recent-sessions";
 import { usePinnedSidebarKeys, type PinnedSidebarGroups } from "@/hooks/use-sidebar-pins";
 import { useSidebarCollapsedSectionsStore } from "@/stores/sidebar-collapsed-sections-store";
 import {
@@ -40,6 +42,7 @@ interface SidebarModel extends SidebarWorkspacesListResult {
   workspaceGroups: SidebarWorkspaceGroup[];
   projectIconTargets: SidebarProjectIconTarget[];
   pinnedGroups: PinnedSidebarGroups;
+  recentSessions: readonly SidebarRecentSession[];
   collapsedProjectKeys: ReadonlySet<string>;
   toggleProjectCollapsed: (projectViewKey: string) => void;
   shortcutModel: SidebarShortcutModel;
@@ -139,6 +142,11 @@ export function SidebarModelProvider({
     visibleWorkspaceKeys,
   ]);
   const pinnedKeys = usePinnedSidebarKeys(filteredProjects);
+  const recentSessions = useRecentSidebarSessions(
+    filteredProjects,
+    pinnedKeys.pinnedWorkspaceKeys,
+    active !== false,
+  );
   const projectionInput = useMemo(
     () => ({
       projects: filteredProjects,
@@ -176,6 +184,7 @@ export function SidebarModelProvider({
       workspaceGroups: projection.workspaceGroups,
       projectIconTargets: projection.projectIconTargets,
       pinnedGroups: projection.pinnedGroups,
+      recentSessions,
       collapsedProjectKeys,
       toggleProjectCollapsed,
       shortcutModel: projection.shortcutModel,
@@ -187,6 +196,7 @@ export function SidebarModelProvider({
       list,
       filteredProjects,
       projection,
+      recentSessions,
       toggleProjectCollapsed,
       filteredWorkspaceEntriesByKey,
     ],
