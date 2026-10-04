@@ -63,6 +63,8 @@ export const fr: TranslationResources = {
       unableToSave: "Impossible d'enregistrer",
       unableToCopy: "Impossible de copier",
       nameRequired: "Le nom est requis",
+      backgroundConnectionUnavailable:
+        "Impossible de maintenir les connexions en arrière-plan. Rouvrez l’application.",
       daemonUnavailable: "Daemonindisponible",
       daemonClientUnavailable: "ClientDaemonindisponible",
       daemonClientDisconnected: "Le clientDaemonest déconnecté",
@@ -1855,6 +1857,11 @@ export const fr: TranslationResources = {
     dontAskAgain: "Ne demande plus",
   },
   downloads: {
+    open: "Ouvrir",
+    share: "Partager",
+    openFailed:
+      "Impossible d’ouvrir ce fichier. Installez une application compatible ou partagez le fichier.",
+    shareFailed: "Impossible de partager ce fichier. Réessayez.",
     requestTokenFailed: "Échec de la demande du jeton de téléchargement.",
     hostUnavailable: "L'hôte de téléchargement n'est pas disponible.",
     cancelled: "Le téléchargement a été annulé.",

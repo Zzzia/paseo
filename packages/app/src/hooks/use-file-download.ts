@@ -1,56 +1,69 @@
-import { useCallback, useMemo } from "react";
-import { useHosts } from "@/runtime/host-runtime";
+import { useCallback, useEffect, useMemo } from "react";
 import { useDownloadStore } from "@/stores/download-store";
-import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
+import { useSessionStore } from "@/stores/session-store";
+import { downloadSourceKey, type DownloadSource } from "@/downloads/download-cache";
+import { resolveFilePreviewReadTarget } from "@/file-explorer/preview-target";
+import { getFileNameFromPath } from "@/attachments/utils";
+import { useRetainedPanelActive } from "@/components/retained-panel";
+import { useAppActivelyVisible } from "@/hooks/use-app-visible";
 
 interface UseFileDownloadParams {
   serverId: string;
-  workspaceId?: string | null;
   workspaceRoot: string;
+  onOpenFile?: (path: string) => void;
 }
 
 /**
- * Returns a stable callback that downloads a single workspace file by its
- * workspace-relative path. Shared by the file explorer tree and the git diff
- * pane so both surfaces download through the same host token + download-store
- * pipeline instead of duplicating the plumbing.
+ * 文件树、预览页和 Git 差异页共用当前连接的分块下载，
+ * 不依赖服务端 HTTP 直连地址。
  */
 export function useFileDownload({
   serverId,
-  workspaceId,
   workspaceRoot,
+  onOpenFile,
 }: UseFileDownloadParams): (input: { fileName: string; path: string }) => void {
-  const daemons = useHosts();
-  const daemonProfile = useMemo(
-    () => daemons.find((daemon) => daemon.serverId === serverId),
-    [daemons, serverId],
-  );
+  const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
   const normalizedWorkspaceRoot = useMemo(() => workspaceRoot.trim(), [workspaceRoot]);
-  const workspaceScopeId = useMemo(
-    () => workspaceId?.trim() || normalizedWorkspaceRoot,
-    [normalizedWorkspaceRoot, workspaceId],
-  );
-  const { requestFileDownloadToken } = useFileExplorerActions({
-    serverId,
-    workspaceId,
-    workspaceRoot: normalizedWorkspaceRoot,
-  });
   const startDownload = useDownloadStore((state) => state.startDownload);
 
   return useCallback(
     ({ fileName, path }) => {
-      if (!workspaceScopeId) {
-        return;
-      }
+      const target = resolveFilePreviewReadTarget({ path, workspaceRoot: normalizedWorkspaceRoot });
+      if (!target) throw new Error(`Cannot download file without a workspace: ${path}`);
+      onOpenFile?.(path);
       void startDownload({
         serverId,
-        scopeId: workspaceScopeId,
         fileName,
-        path,
-        daemonProfile,
-        requestFileDownloadToken: (targetPath) => requestFileDownloadToken(targetPath),
+        ...target,
+        client,
       });
     },
-    [daemonProfile, requestFileDownloadToken, serverId, startDownload, workspaceScopeId],
+    [client, normalizedWorkspaceRoot, onOpenFile, serverId, startDownload],
   );
+}
+
+export function useFileDownloadState(source: DownloadSource) {
+  const client = useSessionStore((state) => state.sessions[source.serverId]?.client ?? null);
+  const key = downloadSourceKey(source);
+  const download = useDownloadStore((state) => state.downloads.get(key));
+  const inspect = useDownloadStore((state) => state.inspectDownload);
+  const retain = useDownloadStore((state) => state.retainDownload);
+  const isTabActive = useRetainedPanelActive();
+  const isAppVisible = useAppActivelyVisible();
+  const { serverId, cwd, path } = source;
+  useEffect(() => retain({ serverId, cwd, path }), [cwd, path, retain, serverId]);
+  useEffect(() => {
+    if (!isTabActive || !isAppVisible) return;
+    const controller = new AbortController();
+    void inspect({
+      serverId,
+      cwd,
+      path,
+      client,
+      fileName: getFileNameFromPath(path) ?? path,
+      signal: controller.signal,
+    });
+    return () => controller.abort();
+  }, [client, cwd, inspect, isAppVisible, isTabActive, path, serverId]);
+  return download;
 }

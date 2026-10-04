@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import nacl from "tweetnacl";
 import {
   generateKeyPair,
   exportPublicKey,
@@ -6,6 +7,7 @@ import {
   deriveSharedKey,
   encrypt,
   decrypt,
+  setPayloadCipher,
 } from "./crypto.js";
 
 function decryptText(sharedKey: Uint8Array, ciphertext: ArrayBuffer): string {
@@ -17,6 +19,55 @@ function bytesFromHex(hex: string): Uint8Array {
 }
 
 describe("crypto", () => {
+  it.each([0, 23, 24, 39])("rejects a %s-byte bundle before entering the cipher", (length) => {
+    const open = vi.fn(nacl.secretbox.open);
+    const previous = setPayloadCipher({ seal: nacl.secretbox, open });
+    try {
+      expect(() => decrypt(new Uint8Array(32), new ArrayBuffer(length))).toThrow(
+        "Ciphertext bundle too short",
+      );
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      setPayloadCipher(previous);
+    }
+  });
+
+  it("keeps the NaCl wire format with an installed cipher", () => {
+    const sharedKey = new Uint8Array(32).fill(7);
+    const plaintext = new Uint8Array([0, 1, 255, 128]);
+    const seal = vi.fn(nacl.secretbox);
+    const open = vi.fn(nacl.secretbox.open);
+    const previous = setPayloadCipher({ seal, open });
+    try {
+      const encrypted = new Uint8Array(encrypt(sharedKey, plaintext.buffer));
+      expect(encrypted.length).toBe(plaintext.length + 40);
+      expect(
+        nacl.box.open.after(encrypted.subarray(24), encrypted.subarray(0, 24), sharedKey),
+      ).toEqual(plaintext);
+      expect(new Uint8Array(decrypt(sharedKey, encrypted.buffer))).toEqual(plaintext);
+      expect(seal).toHaveBeenCalledOnce();
+      expect(open).toHaveBeenCalledOnce();
+    } finally {
+      setPayloadCipher(previous);
+    }
+  });
+
+  it("propagates cipher failure without retrying another implementation", () => {
+    const sharedKey = new Uint8Array(32).fill(7);
+    const encrypted = encrypt(sharedKey, "valid ciphertext");
+    const failure = new Error("Native authentication failed");
+    const open = vi.fn(() => {
+      throw failure;
+    });
+    const previous = setPayloadCipher({ seal: nacl.secretbox, open });
+    try {
+      expect(() => decrypt(sharedKey, encrypted)).toThrow(failure);
+      expect(open).toHaveBeenCalledOnce();
+    } finally {
+      setPayloadCipher(previous);
+    }
+    expect(decryptText(sharedKey, encrypted)).toBe("valid ciphertext");
+  });
   describe("generateKeyPair", () => {
     it("generates a valid keypair", () => {
       const keypair = generateKeyPair();

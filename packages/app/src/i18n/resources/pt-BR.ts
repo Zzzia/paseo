@@ -63,6 +63,8 @@ export const ptBR: TranslationResources = {
       unableToSave: "Não foi possível salvar",
       unableToCopy: "Não foi possível copiar",
       nameRequired: "O nome é obrigatório",
+      backgroundConnectionUnavailable:
+        "Não foi possível manter as conexões em segundo plano. Reabra o aplicativo.",
       daemonUnavailable: "Daemon indisponível",
       daemonClientUnavailable: "Cliente do daemon indisponível",
       daemonClientDisconnected: "O cliente do daemon está desconectado",
@@ -1836,6 +1838,11 @@ export const ptBR: TranslationResources = {
     dontAskAgain: "Não perguntar novamente",
   },
   downloads: {
+    open: "Abrir",
+    share: "Compartilhar",
+    openFailed:
+      "Não foi possível abrir este arquivo. Instale um aplicativo compatível ou compartilhe o arquivo.",
+    shareFailed: "Não foi possível compartilhar este arquivo. Tente novamente.",
     requestTokenFailed: "Falha ao solicitar token de download.",
     hostUnavailable: "Host de download indisponível.",
     cancelled: "Download cancelado.",

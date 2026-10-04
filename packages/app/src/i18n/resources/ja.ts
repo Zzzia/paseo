@@ -63,6 +63,8 @@ export const ja: TranslationResources = {
       unableToSave: "保存できません",
       unableToCopy: "コピーできません",
       nameRequired: "名前は必須です",
+      backgroundConnectionUnavailable:
+        "バックグラウンドでホスト接続を維持できません。アプリを開き直して再試行してください。",
       daemonUnavailable: "デーモンが利用できません",
       daemonClientUnavailable: "デーモンクライアントが利用できません",
       daemonClientDisconnected: "デーモンクライアントが切断されています",
@@ -1822,6 +1824,11 @@ export const ja: TranslationResources = {
     dontAskAgain: "次回から確認しない",
   },
   downloads: {
+    open: "開く",
+    share: "共有",
+    openFailed:
+      "このファイルを開けませんでした。対応するアプリをインストールするか、ファイルを共有してください。",
+    shareFailed: "このファイルを共有できませんでした。もう一度お試しください。",
     requestTokenFailed: "ダウンロードトークンのリクエストに失敗しました。",
     hostUnavailable: "ダウンロードホストが利用できません。",
     cancelled: "ダウンロードがキャンセルされました。",

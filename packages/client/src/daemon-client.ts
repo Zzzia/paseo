@@ -1,4 +1,5 @@
 import { legacyUsageIcon } from "./legacy-usage-icons.js";
+import { FileDownloads, type FileDownloadInput } from "./file-download.js";
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
 import {
@@ -1244,6 +1245,7 @@ export class DaemonClient {
   private connectionState: ConnectionState = { status: "idle" };
   private readonly terminalStreams = new TerminalStreamRouter();
   private pendingBinaryFileReads = new Map<string, PendingBinaryFileRead>();
+  private fileDownloads = new FileDownloads();
   private activeBinaryFileTransfers = new Map<string, BinaryFileTransferState>();
   private completedBinaryFileReads = new Map<string, FileReadResult>();
   private logger: Logger;
@@ -1260,6 +1262,7 @@ export class DaemonClient {
   private livenessHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private lastLivenessRttMs: number | null = null;
   private consecutiveLivenessFailures = 0;
+  private inboundActivityRevision = 0;
 
   constructor(private config: DaemonClientConfig) {
     this.logger = config.logger ?? consoleLogger;
@@ -1577,12 +1580,15 @@ export class DaemonClient {
   private verifyConnection(): void {
     const transport = this.transport;
     if (!transport || this.connectionVerification === transport) return;
+    const inboundActivityRevision = this.inboundActivityRevision;
     this.connectionVerification = transport;
     // A session probe has its own deadline, independent of a heartbeat that the OS
     // may have suspended. A successful response also proves the session can serve RPCs.
     void this.ping({ timeoutMs: 3_000 })
       .catch((error: unknown) => {
         if (this.transport !== transport || this.connectionState.status !== "connected") return;
+        // 慢速文件传输可能把 pong 排在数据后面；探测期间收到有效消息已证明连接存活。
+        if (this.inboundActivityRevision !== inboundActivityRevision) return;
         this.disposeTransport(1001, "Connection verification failed");
         this.scheduleReconnect({
           reason: error instanceof Error ? error.message : String(error),
@@ -4723,6 +4729,21 @@ export class DaemonClient {
     return payload.directory;
   }
 
+  async downloadFile(input: FileDownloadInput) {
+    await this.whenConnected();
+    const requestId = this.createRequestId();
+    return this.fileDownloads.download(input, requestId, () =>
+      this.sendSessionMessageStrict({
+        type: "file_explorer_request",
+        cwd: input.cwd,
+        path: input.path,
+        mode: "file",
+        acceptBinary: true,
+        requestId,
+      }),
+    );
+  }
+
   async readFile(
     cwd: string,
     path: string,
@@ -6306,7 +6327,7 @@ export class DaemonClient {
       return;
     }
 
-    this.consecutiveLivenessFailures = 0;
+    this.recordInboundActivity();
 
     if (parsed.data.type === "pong") {
       this.traceInstant("paseo.ws.message.inbound", {
@@ -6342,6 +6363,11 @@ export class DaemonClient {
     }
   }
 
+  private recordInboundActivity(): void {
+    this.consecutiveLivenessFailures = 0;
+    this.inboundActivityRevision += 1;
+  }
+
   private tryHandleBinaryFrame(rawBytes: Uint8Array): boolean {
     const fileFrame = decodeFileTransferFrame(rawBytes);
     if (fileFrame) {
@@ -6350,8 +6376,8 @@ export class DaemonClient {
         messageType: "file",
         opcode: String(fileFrame.opcode),
       });
-      this.consecutiveLivenessFailures = 0;
-      this.handleFileTransferFrame(fileFrame);
+      this.recordInboundActivity();
+      if (!this.fileDownloads.handleFrame(fileFrame)) this.handleFileTransferFrame(fileFrame);
       this.runtimeMetrics?.recordBinaryFrame("other", rawBytes.byteLength, 0);
       return true;
     }
@@ -6365,7 +6391,7 @@ export class DaemonClient {
       messageType: "terminal",
       opcode: String(frame.opcode),
     });
-    this.consecutiveLivenessFailures = 0;
+    this.recordInboundActivity();
     const binaryStartMs = perfNow();
     this.terminalStreams.handleFrame(frame);
     let frameKind: "output" | "snapshot" | "other" = "other";
@@ -6624,6 +6650,15 @@ export class DaemonClient {
   }
 
   private handleSessionMessage(msg: SessionOutboundMessage): void {
+    if (msg.type === "file_explorer_response") {
+      this.fileDownloads.fail(
+        msg.payload.requestId,
+        new Error(msg.payload.error ?? "Expected a binary file download"),
+      );
+    }
+    if (msg.type === "rpc_error") {
+      this.fileDownloads.fail(msg.payload.requestId, new DaemonRpcError(msg.payload));
+    }
     msg = this.owned.normalize(msg);
     if (
       msg.type === "providers_snapshot_update" &&
@@ -6731,6 +6766,7 @@ export class DaemonClient {
   }
 
   private clearWaiters(error: Error): void {
+    this.fileDownloads.failAll(error);
     for (const waiter of Array.from(this.waiters)) {
       if (waiter.timeoutHandle) {
         clearTimeout(waiter.timeoutHandle);

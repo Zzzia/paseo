@@ -18,6 +18,7 @@ import {
   createDesktopDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
 import type { DesktopDaemonTransportTarget } from "@/desktop/daemon/desktop-daemon";
+import { createAppWebSocketFactory } from "@/runtime/websocket-factory";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -31,6 +32,7 @@ export interface DaemonConnectionDependencies<TClient extends DaemonProbeClient>
   getClientId(): Promise<string>;
   resolveAppVersion(): string | null;
   createDesktopTransportFactory(): DaemonClientConfig["transportFactory"] | null;
+  createWebSocketFactory(): NonNullable<DaemonClientConfig["webSocketFactory"]>;
   buildDesktopTransportUrl(input: DesktopDaemonTransportTarget): string;
   createClient(config: DaemonClientConfig): TClient;
 }
@@ -39,6 +41,7 @@ const defaultDaemonConnectionDependencies: DaemonConnectionDependencies<DaemonCl
   getClientId: getOrCreateClientId,
   resolveAppVersion,
   createDesktopTransportFactory: createDesktopDaemonTransportFactory,
+  createWebSocketFactory: createAppWebSocketFactory,
   buildDesktopTransportUrl: buildDesktopDaemonTransportUrl,
   createClient: (config) => new DaemonClient(config),
 };
@@ -143,6 +146,7 @@ export async function buildClientConfig(
     | "getClientId"
     | "resolveAppVersion"
     | "createDesktopTransportFactory"
+    | "createWebSocketFactory"
     | "buildDesktopTransportUrl"
   > = defaultDaemonConnectionDependencies,
 ): Promise<DaemonClientConfig> {
@@ -153,6 +157,8 @@ export async function buildClientConfig(
     clientType: "mobile" as const,
     appVersion: deps.resolveAppVersion() ?? undefined,
     suppressSendErrors: true,
+    // 成功探测的客户端会成为正式连接，也必须使用应用的原生二进制解码。
+    webSocketFactory: deps.createWebSocketFactory(),
     reconnect: { enabled: false },
     ...resolveConnectionCredentials(connection, options),
     ...(options?.capabilities ? { capabilities: options.capabilities } : {}),

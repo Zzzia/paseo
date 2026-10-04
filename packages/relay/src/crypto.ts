@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 /**
- * E2EE crypto primitives using NaCl (tweetnacl).
+ * NaCl 端到端加密原语，载荷实现由平台选择。
  *
  * - Key exchange: Curve25519 (nacl.box.before)
  * - Encryption: XSalsa20-Poly1305 (nacl.box.after / open.after)
@@ -23,7 +23,22 @@ export interface KeyPair {
 export type SharedKey = Uint8Array; // 32 bytes (box.before)
 
 const NONCE_LENGTH = nacl.box.nonceLength; // 24
+const AUTHENTICATION_BYTES = nacl.box.overheadLength;
 const ZERO_X25519_SHARED_RESULT = new Uint8Array(nacl.box.sharedKeyLength);
+
+export interface PayloadCipher {
+  seal(plaintext: Uint8Array, nonce: Uint8Array, sharedKey: Uint8Array): Uint8Array;
+  open(ciphertext: Uint8Array, nonce: Uint8Array, sharedKey: Uint8Array): Uint8Array | null;
+}
+
+let payloadCipher: PayloadCipher = { seal: nacl.box.after, open: nacl.box.open.after };
+
+// 原生应用在建立连接前安装同算法的 Adapter，避免每帧在 Hermes 中执行密码运算。
+export function setPayloadCipher(cipher: PayloadCipher): PayloadCipher {
+  const previous = payloadCipher;
+  payloadCipher = cipher;
+  return previous;
+}
 
 let prngReady = false;
 
@@ -157,7 +172,7 @@ export function encrypt(sharedKey: SharedKey, data: string | ArrayBuffer): Array
   ensurePrng();
   const nonce = nacl.randomBytes(NONCE_LENGTH);
   const plaintext = toUint8(data);
-  const ciphertext = nacl.box.after(plaintext, nonce, sharedKey);
+  const ciphertext = payloadCipher.seal(plaintext, nonce, sharedKey);
   const out = new Uint8Array(nonce.byteLength + ciphertext.byteLength);
   out.set(nonce, 0);
   out.set(ciphertext, nonce.byteLength);
@@ -166,13 +181,13 @@ export function encrypt(sharedKey: SharedKey, data: string | ArrayBuffer): Array
 
 export function decrypt(sharedKey: SharedKey, data: ArrayBuffer): ArrayBuffer {
   const bytes = new Uint8Array(data);
-  if (bytes.byteLength < NONCE_LENGTH) {
+  if (bytes.byteLength < NONCE_LENGTH + AUTHENTICATION_BYTES) {
     throw new Error("Ciphertext bundle too short");
   }
 
   const nonce = bytes.slice(0, NONCE_LENGTH);
   const ciphertext = bytes.slice(NONCE_LENGTH);
-  const opened = nacl.box.open.after(ciphertext, nonce, sharedKey);
+  const opened = payloadCipher.open(ciphertext, nonce, sharedKey);
   if (!opened) {
     throw new Error("Decryption failed");
   }

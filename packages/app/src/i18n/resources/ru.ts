@@ -63,6 +63,8 @@ export const ru: TranslationResources = {
       unableToSave: "Не удалось сохранить",
       unableToCopy: "Не удалось скопировать",
       nameRequired: "Требуется имя",
+      backgroundConnectionUnavailable:
+        "Не удалось поддержать соединения в фоне. Откройте приложение повторно.",
       daemonUnavailable: "Daemon недоступен",
       daemonClientUnavailable: "Daemon клиента недоступен",
       daemonClientDisconnected: "Daemon клиента отключен",
@@ -1835,6 +1837,10 @@ export const ru: TranslationResources = {
     dontAskAgain: "Больше не спрашивать",
   },
   downloads: {
+    open: "Открыть",
+    share: "Поделиться",
+    openFailed: "Не удалось открыть файл. Установите подходящее приложение или поделитесь файлом.",
+    shareFailed: "Не удалось поделиться файлом. Попробуйте ещё раз.",
     requestTokenFailed: "Не удалось запросить токен загрузки.",
     hostUnavailable: "Хост загрузки недоступен.",
     cancelled: "Загрузка отменена.",

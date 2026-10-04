@@ -23,6 +23,249 @@ import {
 } from "@getpaseo/protocol/terminal-stream-protocol";
 
 expectTypeOf<"getGitDiff" extends keyof DaemonClient ? true : false>().toEqualTypeOf<false>();
+
+async function createDownloadTest(
+  input: {
+    size?: number;
+    signal?: AbortSignal;
+    onStart?: (metadata: { fileName: string; mimeType: string; size: number }) => void;
+    onChunk?: (bytes: Uint8Array) => void;
+    onProgress?: (bytes: number, total: number) => void;
+  } = {},
+) {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "download-old-host",
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connecting;
+  const promise = client.downloadFile({
+    cwd: "/project",
+    path: "远端视频.mp4",
+    signal: input.signal,
+    onStart: input.onStart ?? (() => {}),
+    onChunk: input.onChunk ?? (() => {}),
+    onProgress: input.onProgress,
+  });
+  await Promise.resolve();
+  const request = JSON.parse(assertStr(mock.sent[0])).message;
+  const emit = (
+    opcode: typeof FileTransferOpcode.FileChunk | typeof FileTransferOpcode.FileEnd,
+    payload = new Uint8Array(0),
+  ) =>
+    mock.triggerMessage(
+      encodeFileTransferFrame({
+        opcode,
+        requestId: request.requestId,
+        ...(opcode === FileTransferOpcode.FileChunk ? { payload } : {}),
+      }),
+    );
+  const begin = () =>
+    mock.triggerMessage(
+      encodeFileTransferFrame({
+        opcode: FileTransferOpcode.FileBegin,
+        requestId: request.requestId,
+        metadata: {
+          mime: "application/octet-stream",
+          size: input.size ?? 5,
+          encoding: "binary",
+          modifiedAt: "2026-05-02T00:00:00.000Z",
+        },
+      }),
+    );
+  return { mock, client, promise, request, emit, begin };
+}
+
+test("file download uses existing binary frames on a host without new download capabilities", async () => {
+  const written: Uint8Array[] = [];
+  const progress: number[] = [];
+  const download = await createDownloadTest({
+    onChunk: (bytes) => {
+      written.push(bytes);
+    },
+    onProgress: (bytes) => {
+      progress.push(bytes);
+    },
+  });
+  expect(download.request).toEqual({
+    type: "file_explorer_request",
+    cwd: "/project",
+    path: "远端视频.mp4",
+    mode: "file",
+    acceptBinary: true,
+    requestId: expect.any(String),
+  });
+  download.begin();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([0, 1, 255]));
+  expect(written).toEqual([new Uint8Array([0, 1, 255])]);
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([2, 3]));
+  download.emit(FileTransferOpcode.FileEnd);
+  expect(await download.promise).toMatchObject({
+    fileName: "远端视频.mp4",
+    mimeType: "video/mp4",
+    size: 5,
+    modifiedAt: "2026-05-02T00:00:00.000Z",
+  });
+  expect(progress).toEqual([0, 3, 5]);
+  expect(download.mock.sent).toHaveLength(1);
+});
+
+test("file download rejects a truncated transfer instead of reporting completion", async () => {
+  const download = await createDownloadTest();
+  const result = expect(download.promise).rejects.toThrow("Incomplete file download");
+  download.begin();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1]));
+  download.emit(FileTransferOpcode.FileEnd);
+  await result;
+});
+
+test("file download propagates destination write failures and discards subsequent frames", async () => {
+  const onChunk = vi.fn(() => {
+    throw new Error("disk full");
+  });
+  const download = await createDownloadTest({ onChunk });
+  const result = expect(download.promise).rejects.toThrow("disk full");
+  download.begin();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1]));
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([2]));
+  download.emit(FileTransferOpcode.FileEnd);
+  await result;
+  expect(onChunk).toHaveBeenCalledTimes(1);
+});
+
+test("file download cancellation supports React Native and stops local writes", async () => {
+  const controller = new AbortController();
+  Object.defineProperty(controller.signal, "throwIfAborted", { value: undefined });
+  const onChunk = vi.fn();
+  const download = await createDownloadTest({ signal: controller.signal, onChunk });
+  const result = expect(download.promise).rejects.toThrow("Download cancelled");
+  download.begin();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1]));
+  controller.abort();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([2]));
+  download.emit(FileTransferOpcode.FileEnd);
+  await result;
+  expect(onChunk).toHaveBeenCalledTimes(1);
+});
+
+test("file download releases its destination when the connection is lost", async () => {
+  const download = await createDownloadTest();
+  const result = expect(download.promise).rejects.toThrow("Connection");
+  download.begin();
+  download.mock.triggerClose({ code: 1006, reason: "Connection lost during download" });
+  await result;
+});
+
+test("file download propagates the existing server's file error", async () => {
+  const download = await createDownloadTest();
+  const result = expect(download.promise).rejects.toThrow("File changed during transfer");
+  download.begin();
+  download.mock.triggerMessage(
+    wrapSessionMessage({
+      type: "file_explorer_response",
+      payload: {
+        cwd: "/project",
+        path: "远端视频.mp4",
+        mode: "file",
+        directory: null,
+        file: null,
+        error: "File changed during transfer",
+        requestId: download.request.requestId,
+      },
+    }),
+  );
+  await result;
+});
+
+test("file download accepts a header delayed by more than thirty seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    const download = await createDownloadTest();
+    const result = download.promise.then(
+      (metadata) => ({ metadata }),
+      (error: unknown) => ({ error }),
+    );
+    await vi.advanceTimersByTimeAsync(300_000);
+    download.begin();
+    download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1, 2, 3, 4, 5]));
+    download.emit(FileTransferOpcode.FileEnd);
+    expect(await result).toEqual({
+      metadata: expect.objectContaining({ fileName: "远端视频.mp4", size: 5 }),
+    });
+    download.client.close();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("file download completes after long pauses between chunks and before the end frame", async () => {
+  vi.useFakeTimers();
+  try {
+    const progress: number[] = [];
+    const written: Uint8Array[] = [];
+    const download = await createDownloadTest({
+      onChunk: (bytes) => written.push(bytes),
+      onProgress: (bytes) => progress.push(bytes),
+    });
+    const result = download.promise.then(
+      (metadata) => ({ metadata }),
+      (error: unknown) => ({ error }),
+    );
+    download.begin();
+    download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1, 2]));
+    await vi.advanceTimersByTimeAsync(300_000);
+    download.emit(FileTransferOpcode.FileChunk, new Uint8Array([3, 4, 5]));
+    await vi.advanceTimersByTimeAsync(300_000);
+    download.emit(FileTransferOpcode.FileEnd);
+    expect(await result).toEqual({ metadata: expect.objectContaining({ size: 5 }) });
+    expect(written).toEqual([new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]);
+    expect(progress).toEqual([0, 2, 5]);
+    download.client.close();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("file download can still be cancelled after a long pause and discards remaining frames", async () => {
+  vi.useFakeTimers();
+  try {
+    const controller = new AbortController();
+    const onChunk = vi.fn();
+    const download = await createDownloadTest({ signal: controller.signal, onChunk });
+    const result = expect(download.promise).rejects.toThrow("Download cancelled");
+    download.begin();
+    download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1]));
+    await vi.advanceTimersByTimeAsync(300_000);
+    controller.abort();
+    download.emit(FileTransferOpcode.FileChunk, new Uint8Array([2, 3, 4, 5]));
+    download.emit(FileTransferOpcode.FileEnd);
+    await result;
+    expect(onChunk).toHaveBeenCalledTimes(1);
+    download.client.close();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("file download still rejects a disconnect after a long pause", async () => {
+  vi.useFakeTimers();
+  try {
+    const download = await createDownloadTest();
+    const result = expect(download.promise).rejects.toThrow("Connection lost during download");
+    download.begin();
+    await vi.advanceTimersByTimeAsync(300_000);
+    download.mock.triggerClose({ code: 1006, reason: "Connection lost during download" });
+    await result;
+    download.client.close();
+  } finally {
+    vi.useRealTimers();
+  }
+});
 expectTypeOf<
   "getHighlightedDiff" extends keyof DaemonClient ? true : false
 >().toEqualTypeOf<false>();
@@ -2097,6 +2340,39 @@ test("foreground verification preserves a healthy socket and deduplicates simult
   expect(client.getConnectionState()).toEqual({ status: "connected" });
   expect(daemon.pingTimestamps()).toEqual(["0s"]);
   expect(daemon.closesFromClient()).toEqual([]);
+});
+
+test("foreground verification keeps a download receiving valid frames while its pong is queued", async () => {
+  useHeartbeatClock();
+  const download = await createDownloadTest({ size: 3 });
+  const close = vi.spyOn(download.mock.transport, "close");
+  const completion = download.promise.catch((error: unknown) => error);
+  download.begin();
+  download.client.ensureConnected({ verify: true });
+  await vi.advanceTimersByTimeAsync(1_000);
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([1]));
+  await vi.advanceTimersByTimeAsync(1_000);
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([2]));
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(download.client.getConnectionState()).toEqual({ status: "connected" });
+  expect(close).not.toHaveBeenCalled();
+  download.emit(FileTransferOpcode.FileChunk, new Uint8Array([3]));
+  download.emit(FileTransferOpcode.FileEnd);
+  expect(await completion).toMatchObject({ size: 3 });
+});
+
+test("foreground verification does not treat malformed traffic as a healthy connection", async () => {
+  useHeartbeatClock();
+  const download = await createDownloadTest();
+  const completion = download.promise.catch((error: unknown) => error);
+  download.begin();
+  download.client.ensureConnected({ verify: true });
+  await vi.advanceTimersByTimeAsync(1_000);
+  download.mock.triggerMessage(JSON.stringify({ type: "unknown_message" }));
+  download.mock.triggerMessage(new Uint8Array([255]));
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(download.client.getConnectionState().status).toBe("connecting");
+  expect(await completion).toBeInstanceOf(Error);
 });
 
 test("an obsolete foreground probe cannot close a replacement connection", async () => {

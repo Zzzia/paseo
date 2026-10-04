@@ -1,0 +1,6 @@
+<resources>
+  <string name="background_connection_channel">Background connection</string>
+  <string name="background_connection_title">Paseo is running in the background</string>
+  <string name="background_connection_body">Keeping your host connections and downloads active</string>
+  <string name="background_connection_stop">Stop background activity</string>
+</resources>

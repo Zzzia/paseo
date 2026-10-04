@@ -30,6 +30,7 @@ import {
 import type { ReplicaRow, ReplicaRowStore } from "./replica-cache/row-store";
 
 import { subscriptionFixture } from "./subscription-fixture";
+import { bindBackgroundConnection } from "./background-connection/binding";
 import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-credential";
 import type { HostConfirmationRequest } from "./host-confirmation";
 
@@ -1655,6 +1656,68 @@ describe("HostRuntimeController", () => {
 });
 
 describe("HostRuntimeStore", () => {
+  it("keeps one background service until the final host is removed", async () => {
+    let hosts: HostProfile[] = [];
+    let changed = () => {};
+    const unsubscribe = vi.fn();
+    const setEnabled = vi.fn().mockResolvedValue(undefined);
+    const onError = vi.fn();
+    const dispose = bindBackgroundConnection(
+      {
+        getHosts: () => hosts,
+        subscribeHostList: (listener) => {
+          changed = listener;
+          return unsubscribe;
+        },
+      },
+      { setEnabled, onError },
+    );
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenLastCalledWith(false));
+    hosts = [makeHost()];
+    changed();
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenLastCalledWith(true));
+    hosts = [...hosts, makeHost({ serverId: "second-host" })];
+    changed();
+    hosts = hosts.slice(1);
+    changed();
+    expect(setEnabled).toHaveBeenCalledTimes(2);
+    hosts = [];
+    changed();
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenLastCalledWith(false));
+    dispose();
+    expect(setEnabled).toHaveBeenCalledTimes(3);
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("waits for a pending service start before disposing it", async () => {
+    const start = createDeferred<void>();
+    const setEnabled = vi.fn((enabled: boolean) => (enabled ? start.promise : Promise.resolve()));
+    const dispose = bindBackgroundConnection(
+      { getHosts: () => [makeHost()], subscribeHostList: () => () => {} },
+      { setEnabled, onError: vi.fn() },
+    );
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenCalledWith(true));
+    dispose();
+    expect(setEnabled).toHaveBeenCalledTimes(1);
+    start.resolve();
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenLastCalledWith(false));
+    expect(setEnabled).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a rejected background service start and still runs cleanup", async () => {
+    const error = new Error("Foreground service start denied");
+    const setEnabled = vi.fn().mockRejectedValueOnce(error).mockResolvedValue(undefined);
+    const onError = vi.fn();
+    const dispose = bindBackgroundConnection(
+      { getHosts: () => [makeHost()], subscribeHostList: () => () => {} },
+      { setEnabled, onError },
+    );
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(error));
+    dispose();
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenLastCalledWith(false));
+  });
+
   it.each(["active", "inactive", "background"] as const)(
     "keeps reconnect enabled through inactive/background and resumes immediately (mounted %s)",
     async (currentState) => {

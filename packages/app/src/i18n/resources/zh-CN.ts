@@ -62,6 +62,7 @@ export const zhCN: TranslationResources = {
       unableToSave: "无法保存",
       unableToCopy: "无法复制",
       nameRequired: "名称必填",
+      backgroundConnectionUnavailable: "无法保持后台主机连接，请重新打开应用重试。",
       daemonUnavailable: "Daemon 不可用",
       daemonClientUnavailable: "Daemon client 不可用",
       daemonClientDisconnected: "Daemon client 已断开连接",
@@ -1781,6 +1782,10 @@ export const zhCN: TranslationResources = {
     dontAskAgain: "不再询问",
   },
   downloads: {
+    open: "打开",
+    share: "分享",
+    openFailed: "无法打开此文件。请安装支持该格式的应用，或分享文件。",
+    shareFailed: "分享文件失败，请重试。",
     requestTokenFailed: "请求下载 token 失败。",
     hostUnavailable: "下载 Host 不可用。",
     cancelled: "下载已取消。",

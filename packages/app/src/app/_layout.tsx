@@ -27,7 +27,6 @@ import { CommandCenterWorkspaceActions } from "@/command-center/workspace-regist
 import { PluginCommandCenterActions } from "@/plugins/command-center/registration";
 import { AddProjectFlowHost } from "@/components/add-project-flow-host";
 import { WorktreeSetupCalloutSource } from "@/components/worktree-setup-callout-source";
-import { DownloadToast } from "@/components/download-toast";
 import { QuittingOverlay } from "@/components/quitting-overlay";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { ChangelogHost } from "@/changelog";
@@ -61,7 +60,9 @@ import { isNative, isWeb } from "@/constants/platform";
 import { HorizontalScrollProvider } from "@/contexts/horizontal-scroll-context";
 import { SessionProvider } from "@/contexts/session-context";
 import { SidebarCalloutProvider } from "@/contexts/sidebar-callout-context";
-import { ToastProvider } from "@/contexts/toast-context";
+import { ToastProvider, useToast } from "@/contexts/toast-context";
+import { useTranslation } from "react-i18next";
+import { bindBackgroundConnectionRuntime } from "@/runtime/background-connection/runtime";
 import { VoiceProvider } from "@/contexts/voice-context";
 import {
   resolveStartupBlocker,
@@ -369,6 +370,21 @@ async function shouldStartBuiltInDaemon(): Promise<boolean> {
 }
 
 function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
+  const toast = useToast();
+  const { t } = useTranslation();
+  function reportBackgroundError(error: unknown): void {
+    console.error("Could not enable Android background host connections", error);
+    toast.error(t("common.errors.backgroundConnectionUnavailable"));
+  }
+  const backgroundErrorRef = useRef(reportBackgroundError);
+  // 切换语言只更新错误提示，不应停止并重新开启后台连接服务。
+  backgroundErrorRef.current = reportBackgroundError;
+  useEffect(() => {
+    return bindBackgroundConnectionRuntime(getHostRuntimeStore(), (error) => {
+      backgroundErrorRef.current(error);
+    });
+  }, []);
+
   useEffect(() => {
     const store = getHostRuntimeStore();
     return bindHostRuntimeAppState(store, AppState);
@@ -594,7 +610,6 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
       </AppearanceStyleBoundary>
       {isCompactLayout ? themedSidebarChrome : null}
       <AppearanceStyleBoundary>
-        <DownloadToast />
         <RosettaCalloutSource />
         <UpdateCalloutSource />
         <LegacyAgentSkillsMigration />

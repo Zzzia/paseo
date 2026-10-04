@@ -21,6 +21,10 @@ import {
 import { buildRelayWebSocketUrl } from "@getpaseo/protocol/daemon-endpoints";
 import { ConnectionOfferSchema } from "@getpaseo/protocol/connection-offer";
 import { WSOutboundMessageSchema } from "@getpaseo/protocol/messages";
+import { DaemonClient } from "../test-utils/daemon-client.js";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import os from "node:os";
+import { FILE_EXPLORER_STREAM_CHUNK_BYTES } from "../file-explorer/service.js";
 
 const nodeMajor = Number((process.versions.node ?? "0").split(".")[0] ?? "0");
 const shouldRunRelayE2e = process.env.FORCE_RELAY_E2E === "1" || nodeMajor < 25;
@@ -240,6 +244,58 @@ async function waitForCapturedLog(
     relayProcess.kill("SIGTERM");
     relayProcess = null;
   };
+
+  test("downloads a large MP4 through the encrypted relay", async () => {
+    await startRelay({ useLocalRelay: true });
+    const daemon = await createTestPaseoDaemon({
+      relayEnabled: true,
+      relayEndpoint: `127.0.0.1:${relayPort}`,
+      relayUseTls: false,
+      relayPublicUseTls: false,
+    });
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "relay-download-"));
+    const source = Buffer.alloc(5 * 1024 * 1024 + 37, 213);
+    await writeFile(path.join(cwd, "remote.mp4"), source);
+    const offerUrl = await getPairingOfferUrl({
+      paseoHome: daemon.paseoHome,
+      relayEnabled: true,
+      relayEndpoint: daemon.config.relayEndpoint,
+    });
+    const offer = decodeOfferFromFragmentUrl(offerUrl);
+    const client = new DaemonClient({
+      url: buildRelayWebSocketUrl({
+        endpoint: `127.0.0.1:${relayPort}`,
+        useTls: false,
+        serverId: offer.serverId,
+        role: "client",
+      }),
+      e2ee: { enabled: true, daemonPublicKeyB64: offer.daemonPublicKeyB64 },
+      appVersion: "0.11.0-beta.3",
+      reconnect: { enabled: false },
+    });
+    try {
+      await client.connect();
+      const chunks: Buffer[] = [];
+      const metadata = await client.downloadFile({
+        cwd,
+        path: "remote.mp4",
+        onStart: () => {},
+        onChunk: (bytes) => {
+          chunks.push(Buffer.from(bytes));
+        },
+      });
+      expect(metadata).toMatchObject({ mimeType: "video/mp4", size: source.length });
+      expect(Buffer.concat(chunks)).toEqual(source);
+      expect(chunks.map((chunk) => chunk.length)).toEqual(
+        Array.from({ length: 20 }, () => FILE_EXPLORER_STREAM_CHUNK_BYTES).concat(37),
+      );
+    } finally {
+      await client.close();
+      await daemon.close();
+      await stopRelay();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 90_000);
 
   test("daemon connects to relay and client ping/pong works through relay", async () => {
     process.env.PASEO_PRIMARY_LAN_IP = "192.168.1.12";

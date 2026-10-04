@@ -37,6 +37,7 @@ class FakeDaemonProbe {
   clientIdsRequested = 0;
   nextConnectError: Error | null = null;
   nextLastError: string | null = null;
+  readonly webSocketFactory = vi.fn<NonNullable<DaemonClientConfig["webSocketFactory"]>>();
 
   readonly deps: DaemonConnectionDependencies<FakeDaemonClient> = {
     getClientId: async () => {
@@ -45,6 +46,7 @@ class FakeDaemonProbe {
     },
     resolveAppVersion: () => null,
     createDesktopTransportFactory: () => null,
+    createWebSocketFactory: () => this.webSocketFactory,
     buildDesktopTransportUrl: (target) => {
       if (target.transportType === "ssh") {
         return `paseo+desktop://ssh?host=${encodeURIComponent(target.host)}`;
@@ -74,6 +76,22 @@ describe("test-daemon-connection connectToDaemon", () => {
   beforeEach(() => {
     vi.stubGlobal("__DEV__", false);
     probe = new FakeDaemonProbe();
+  });
+
+  it.each([
+    { id: "direct:lan:6767", type: "directTcp" as const, endpoint: "lan:6767" },
+    {
+      id: "relay:test",
+      type: "relay" as const,
+      relayEndpoint: "relay.example.com:443",
+      daemonPublicKeyB64: "test-public-key",
+    },
+  ])("keeps the app decoder when a $type probe becomes the active client", async (connection) => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    const result = await connectToDaemon(connection, { serverId: "srv_test" }, probe.deps);
+    expect(probe.createdConfigs()[0]?.webSocketFactory).toBe(probe.webSocketFactory);
+    expect(result.client.config.webSocketFactory).toBe(probe.webSocketFactory);
+    await result.client.close();
   });
 
   it("reuses the app clientId for direct connections", async () => {

@@ -58,6 +58,8 @@ export const en = {
       unableToSave: "Unable to save",
       unableToCopy: "Unable to copy",
       nameRequired: "Name is required",
+      backgroundConnectionUnavailable:
+        "Could not keep host connections active in the background. Reopen the app to retry.",
       daemonUnavailable: "Daemon unavailable",
       daemonClientUnavailable: "Daemon client unavailable",
       daemonClientDisconnected: "Daemon client is disconnected",
@@ -1828,6 +1830,10 @@ export const en = {
     dontAskAgain: "Don't ask again",
   },
   downloads: {
+    open: "Open",
+    share: "Share",
+    openFailed: "Could not open this file. Install an app that supports it, or share the file.",
+    shareFailed: "Could not share this file. Try again.",
     requestTokenFailed: "Failed to request download token.",
     hostUnavailable: "Download host is unavailable.",
     cancelled: "Download was cancelled.",
