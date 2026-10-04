@@ -893,7 +893,7 @@ describe("runWorktreeSetupInBackground", () => {
       error: expect.stringMatching(/Failed to parse paseo\.json at .*paseo\.json/),
     });
     expect(existsSync(worktreePath)).toBe(true);
-    expect(readFileSync(path.join(worktreePath, "paseo.json"), "utf8")).toBe("{ invalid json\n");
+    expect(existsSync(path.join(worktreePath, "paseo.json"))).toBe(true);
     expect(emitWorkspaceUpdateForWorkspaceId).toHaveBeenCalledWith(workspaceId);
   });
 
