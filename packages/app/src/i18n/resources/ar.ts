@@ -62,6 +62,8 @@ export const ar: TranslationResources = {
       unableToSave: "غير قادر على الحفظ",
       unableToCopy: "تعذر النسخ",
       nameRequired: "الاسم مطلوب",
+      backgroundConnectionUnavailable:
+        "تعذر إبقاء اتصالات المضيف نشطة في الخلفية. أعد فتح التطبيق للمحاولة مجددًا.",
       daemonUnavailable: "Daemon غير متوفر",
       daemonClientUnavailable: "عميل Daemon غير متوفر",
       daemonClientDisconnected: "تم قطع اتصال عميل Daemon",
@@ -1809,6 +1811,10 @@ export const ar: TranslationResources = {
     dontAskAgain: "لا تسأل مرة أخرى",
   },
   downloads: {
+    open: "فتح",
+    share: "مشاركة",
+    openFailed: "تعذر فتح هذا الملف. ثبّت تطبيقًا يدعم تنسيقه، أو شارك الملف.",
+    shareFailed: "تعذرت مشاركة هذا الملف. حاول مرة أخرى.",
     requestTokenFailed: "فشل طلب رمز التنزيل.",
     hostUnavailable: "مضيف التنزيل غير متاح.",
     cancelled: "تم إلغاء التنزيل.",

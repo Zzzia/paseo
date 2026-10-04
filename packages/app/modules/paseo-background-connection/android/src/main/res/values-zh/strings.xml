@@ -1,0 +1,6 @@
+<resources>
+  <string name="background_connection_channel">后台连接</string>
+  <string name="background_connection_title">Paseo 正在后台运行</string>
+  <string name="background_connection_body">保持主机连接，继续接收更新和下载</string>
+  <string name="background_connection_stop">停止后台运行</string>
+</resources>

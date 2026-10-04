@@ -28,6 +28,7 @@ import {
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { getHostRuntimeStore, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { keepsConnectionsActiveInBackground } from "@/runtime/background-connection/runtime";
 import { useVoiceAudioEngineOptional, useVoiceRuntimeOptional } from "@/contexts/voice-context";
 import type { AudioPlaybackSource } from "@/audio";
 import {
@@ -241,6 +242,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const audioOutputBuffersRef = useRef<Map<string, BufferedAudioChunk[]>>(new Map());
   const activeAudioGroupsRef = useRef<Set<string>>(new Set());
   const isAppVisible = useAppVisible();
+  const timelineActive = isAppVisible || keepsConnectionsActiveInBackground;
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -253,8 +255,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   }, []);
 
   useEffect(() => {
-    viewedTimelineSyncRef.current?.setActive(isAppVisible);
-  }, [isAppVisible]);
+    viewedTimelineSyncRef.current?.setActive(timelineActive);
+  }, [timelineActive]);
 
   // Client activity tracking (heartbeat, push token registration)
   useClientActivity({
@@ -479,7 +481,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     });
     viewedTimelineSyncRef.current = sync;
     setViewedTimelineSync(serverId, sync);
-    sync.setActive(getIsAppVisible(appStateRef.current));
+    sync.setActive(getIsAppVisible(appStateRef.current) || keepsConnectionsActiveInBackground);
     const stopObservingOpenChats = observeOpenWorkspaceAgentIds(serverId, (agentIds) =>
       sync.replaceOpenTabAgentIds(agentIds),
     );

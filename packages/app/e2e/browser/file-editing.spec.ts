@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { expect, test, type Page } from "../support/fixtures";
 import {
   openFileExplorer,
@@ -126,6 +127,91 @@ test.describe("CodeMirror workspace file editing", () => {
     }
   });
 
+  test("downloads an unsupported MP4 from its preview", async ({ page, withWorkspace }) => {
+    const workspace = await withWorkspace({ prefix: "file-download-preview-" });
+    const source = Buffer.alloc(5 * 1024 * 1024 + 17, 137);
+    await writeFile(path.join(workspace.repoPath, "远端视频.mp4"), source);
+    await workspace.navigateTo();
+    await openWorkspaceFile(page, "远端视频.mp4");
+    await expect(page.getByText("Binary preview unavailable", { exact: true })).toBeVisible();
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByTestId("file-pane-download").click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe("远端视频.mp4");
+    expect(await download.failure()).toBeNull();
+    const downloadedPath = await download.path();
+    expect(await readFile(downloadedPath!)).toEqual(source);
+  });
+
+  test("shows an actionable download failure when the remote file is removed", async ({
+    page,
+    withWorkspace,
+  }) => {
+    const workspace = await withWorkspace({ prefix: "file-download-error-" });
+    const filePath = path.join(workspace.repoPath, "gone.mp4");
+    await writeFile(filePath, Buffer.from([0, 1, 2]));
+    await workspace.navigateTo();
+    await openWorkspaceFile(page, "gone.mp4");
+    await expect(page.getByTestId("file-pane-download")).toBeVisible();
+    await rm(filePath);
+    await page.getByTestId("file-pane-download").click();
+    await expect(page.getByTestId("file-download-status").filter({ visible: true })).toContainText(
+      "ENOENT",
+    );
+    await expect(page.getByTestId("file-pane-download").filter({ visible: true })).toBeEnabled();
+    await expect(page.getByTestId("download-toast")).not.toBeVisible();
+  });
+
+  test("keeps a pending download inside its file tab while other work stays usable", async ({
+    page,
+    withWorkspace,
+  }) => {
+    const gate = await installDaemonWebSocketGate(page);
+    const workspace = await withWorkspace({ prefix: "file-download-tab-" });
+    await writeFile(
+      path.join(workspace.repoPath, "movie.mp4"),
+      Buffer.alloc(1024 * 1024 + 17, 137),
+    );
+    await writeFile(
+      path.join(workspace.repoPath, "notes.txt"),
+      "Keep working while the movie downloads",
+    );
+    await workspace.navigateTo();
+    await openWorkspaceFile(page, "notes.txt");
+    await replaceEditorText(page, "Keep working with unsaved notes");
+    await expect(page.getByTestId("workspace-tab-modified-file_notes.txt")).toBeVisible();
+    await openWorkspaceFile(page, "movie.mp4");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByText("Binary preview unavailable", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("file-pane-download").filter({ visible: true })).toBeEnabled();
+    gate.holdFileReads("movie.mp4");
+    await page.getByTestId("file-pane-download").filter({ visible: true }).click();
+    await gate.waitForHeldFileRead();
+    await expect(page.getByTestId("file-download-cancel").filter({ visible: true })).toBeVisible();
+    await expect(page.getByTestId("file-download-status").filter({ visible: true })).toContainText(
+      "Starting",
+    );
+    await expect(page.getByTestId("download-toast")).not.toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("download-in-file-tab-mobile.png") });
+    await page.getByTestId("workspace-tab-switcher-trigger").click();
+    await page.getByText("notes.txt", { exact: true }).filter({ visible: true }).first().click();
+    await expect(editor(page)).toContainText("Keep working");
+    await expect(page.getByTestId("file-download-cancel").filter({ visible: true })).toHaveCount(0);
+    await expect(page.getByTestId("file-download-status").filter({ visible: true })).toHaveCount(0);
+    await expect(page.getByTestId("download-toast")).not.toBeVisible();
+    const downloaded = page.waitForEvent("download");
+    gate.releaseHeldFileRead();
+    expect((await downloaded).suggestedFilename()).toBe("movie.mp4");
+    await expect(editor(page)).toContainText("Keep working");
+    await page.getByTestId("workspace-tab-switcher-trigger").click();
+    await page.getByText("movie.mp4", { exact: true }).filter({ visible: true }).first().click();
+    await expect(page.getByTestId("file-download-status").filter({ visible: true })).toContainText(
+      "Download complete",
+    );
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.screenshot({ path: test.info().outputPath("download-in-file-tab-desktop.png") });
+  });
+
   test("shows an absolute POSIX assistant file link relative to the workspace on hover", async ({
     page,
   }) => {
@@ -236,6 +322,19 @@ test.describe("CodeMirror workspace file editing", () => {
       await expect(page.getByTestId("message-input-root")).toBeVisible();
       await page.getByTestId("workspace-tab-file_too-large.txt").first().click();
       await expect(page.getByTestId("file-source-too-large")).toBeVisible();
+      const downloadPromise = page.waitForEvent("download");
+      await page.getByTestId("file-pane-download").click();
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toBe("too-large.txt");
+      expect(await download.failure()).toBeNull();
+      const downloadedPath = await download.path();
+      const receivedHash = createHash("sha256")
+        .update(await readFile(downloadedPath!))
+        .digest("hex");
+      const sourceHash = createHash("sha256")
+        .update(Buffer.alloc(51 * 1024 * 1024))
+        .digest("hex");
+      expect(receivedHash).toBe(sourceHash);
     } finally {
       await session.cleanup();
     }

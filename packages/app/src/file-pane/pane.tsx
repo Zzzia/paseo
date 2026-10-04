@@ -21,6 +21,7 @@ import { resolveFilePreviewReadTarget } from "@/file-explorer/preview-target";
 import type { WorkspaceFileLocation } from "@/workspace/file-open";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useAppActivelyVisible } from "@/hooks/use-app-visible";
+import { keepsConnectionsActiveInBackground } from "@/runtime/background-connection/runtime";
 import { isFileQueryEnabled } from "@/components/file-pane-enabled";
 import { isWeb } from "@/constants/platform";
 import { useAppSettings } from "@/hooks/use-settings";
@@ -28,6 +29,7 @@ import { useLiveFile } from "./live-file/hook";
 import { useFilePreview } from "./preview-lifecycle/hook";
 import { resolveFilePreviewLifecycle } from "./preview-lifecycle/model";
 import { FilePanelBar } from "./bar";
+import { FileDownloadBar } from "./download-bar";
 import { FileHtmlPreview } from "./html-preview";
 import { FileMarkdownPreview } from "./markdown-preview";
 import { FileEditorModel, getFileConflictCallout, type FileConflictCallout } from "./editor/model";
@@ -252,15 +254,14 @@ export function FilePane({
     [normalizedFilePath, normalizedWorkspaceRoot],
   );
 
-  // Re-read the file when this pane becomes visible again (#445). `isActive`
-  // covers tab switches; active app visibility covers backgrounding and returning
-  // from another window after an external edit. The gate lives in isFileQueryEnabled.
+  // 安卓后台继续接收文件更新；其他平台回前台时重新读取，隐藏标签页不订阅。
   const isActive = useRetainedPanelActive();
   const isAppVisible = useAppActivelyVisible();
   const enabled = isFileQueryEnabled({
     hasReadTarget: Boolean(client && readTarget),
     isTabActive: isActive,
     isAppVisible,
+    keepsConnectionsActiveInBackground,
   });
   const liveFile = useLiveFile({
     client,
@@ -295,28 +296,31 @@ export function FilePane({
     previewLifecycle.status === "preparing";
 
   return (
-    <FilePanePresentation
-      serverId={serverId}
-      client={client}
-      readTarget={readTarget}
-      preview={preview}
-      liveFile={liveFile.model}
-      onRetryRead={liveFile.refresh}
-      retryingRead={liveFile.isRetrying}
-      retryLabel={t("common.actions.retry")}
-      filename={getFileNameFromPath(location.path) ?? location.path}
-      previewMode={canTogglePreviewMode ? previewMode : undefined}
-      onPreviewModeChange={canTogglePreviewMode ? setPreviewMode : undefined}
-      lineCount={lineCount}
-      editable={editable}
-      disconnectedMessage={t("workspace.terminal.hostDisconnected")}
-      errorMessage={errorMessage}
-      isLoading={isLoading}
-      isMobile={isMobile}
-      location={location}
-      navigationRevision={navigationRevision}
-      imagePreviewUri={imagePreviewUri}
-    />
+    <View style={styles.container}>
+      {readTarget ? <FileDownloadBar serverId={serverId} target={readTarget} /> : null}
+      <FilePanePresentation
+        serverId={serverId}
+        client={client}
+        readTarget={readTarget}
+        preview={preview}
+        liveFile={liveFile.model}
+        onRetryRead={liveFile.refresh}
+        retryingRead={liveFile.isRetrying}
+        retryLabel={t("common.actions.retry")}
+        filename={getFileNameFromPath(location.path) ?? location.path}
+        previewMode={canTogglePreviewMode ? previewMode : undefined}
+        onPreviewModeChange={canTogglePreviewMode ? setPreviewMode : undefined}
+        lineCount={lineCount}
+        editable={editable}
+        disconnectedMessage={t("workspace.terminal.hostDisconnected")}
+        errorMessage={errorMessage}
+        isLoading={isLoading}
+        isMobile={isMobile}
+        location={location}
+        navigationRevision={navigationRevision}
+        imagePreviewUri={imagePreviewUri}
+      />
+    </View>
   );
 }
 

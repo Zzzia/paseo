@@ -465,8 +465,8 @@ export function FileExplorerPane({
   const [pendingEdit, setPendingEdit] = useState<ExplorerPendingEdit | null>(null);
   const downloadFile = useFileDownload({
     serverId,
-    workspaceId,
     workspaceRoot: normalizedWorkspaceRoot,
+    onOpenFile,
   });
   const sortOption = usePanelStore((state) => state.explorerSortOption);
   const showHiddenFiles = usePanelStore((state) => state.explorerShowHiddenFiles);

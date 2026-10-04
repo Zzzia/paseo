@@ -95,6 +95,28 @@ npx cross-env APP_VARIANT=production expo run:android --variant=release
 rm -rf android
 ```
 
+## 后台主机连接
+
+配置主机后，安卓客户端从前台启动 `connectedDevice` 前台服务，显示低优先级常驻通知。切到其他应用时继续使用已有连接、心跳、更新订阅和下载，已打开的聊天和当前文件继续同步；回前台先检查连接，健康连接继续使用，不因前后台切换而重复补拉聊天，实际断线才重新连接和恢复数据。服务和后台任务复用应用运行时，不创建第二套客户端，不要求升级 daemon 或 relay。
+
+服务必须同时持有 Headless JS 任务。React Native 0.81.5 在 Activity 暂停时停用 JavaScript 定时器；只提高进程优先级仍会停止心跳，导致服务端连接租约过期。任务随着服务结束而完成，释放唤醒锁。移除最后一个主机、通知中的“停止后台运行”或从最近任务中移除应用会结束后台保护；再次进入前台可恢复。
+
+大文件与控制回复共享连接，慢速传输可能延迟探测回复。有后台执行支持时，不因为切后台释放当前文件订阅；前台健康探测超时也不能忽略期间收到的有效数据，否则会错误关闭正在下载的连接。
+
+Android 的深度休眠仍会限制网络。需要长时间熄屏保持连接时，在系统电池设置中将 Paseo 设为“不受限制”；部分厂商还需要允许后台运行。应用不自行绕过用户的省电设置。正常切换应用无需这项授权。
+
+接口依据：[Android 前台服务类型及前置权限](https://developer.android.com/develop/background-work/services/fgs/service-types)、[React Native 0.81 Headless JS](https://reactnative.dev/docs/0.81/headless-js-android)、安装的 `JavaTimerManager` 和 `HeadlessJsTaskService` 源码。`CHANGE_NETWORK_STATE` 满足网络设备连接服务的声明前置条件，不会改动用户网络路线。系统省电边界见 [Android Doze](https://developer.android.com/training/monitoring-device-state/doze-standby)。
+
+## 原生二进制接收
+
+原生应用的 WebSocket 工厂使用原生 Base64 解码。上游 React Native 0.81.5 在 JavaScript 中解码桥接的二进制帧，当前通过版本绑定的 `patch-package` 补丁提供每个连接的解码器选项，避免改写全局 Base64 函数。
+
+探测连接和常规重连都必须使用应用 WebSocket 工厂。启动时探测成功的客户端会直接成为活动客户端；只在重连入口注入工厂，会让首次连接仍走 JavaScript 解码，持续下载时占住手势与取消所需的执行时间。
+
+保留依赖安装的 postinstall。若使用 `npm ci --ignore-scripts`，在项目根目录执行 `npm run postinstall` 后再构建；应用会检查补丁能力，缺少补丁时明确报错。升级 React Native 时重新验证这个补丁；上游具备等价的原生字节接收能力后才能移除。
+
+接口依据：[React Native 0.81.5 WebSocket 源码](https://github.com/facebook/react-native/blob/v0.81.5/packages/react-native/Libraries/WebSocket/WebSocket.js)、安装的 `react-native-libsodium` 1.7.0。解码器选项是本仓库补丁新增的接口。完整应用必须验证加密连接与文件完整性，解码跑分不能替代实际公网下载；更新要求见 [远端文件下载](file-downloads.md)。
+
 ## Running on an emulator against a worktree daemon
 
 `npm run android` builds and installs the dev client, but two connections have to reach your Mac from inside the emulator — Metro (the JS bundle) and the Paseo daemon — and **the emulator does not share the host's loopback**: `localhost` inside the emulator is the emulator itself. Reach the host at `10.0.2.2` (the standard AVD's host alias) for both:

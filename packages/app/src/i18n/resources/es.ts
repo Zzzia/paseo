@@ -63,6 +63,8 @@ export const es: TranslationResources = {
       unableToSave: "No se puede guardar",
       unableToCopy: "No se pudo copiar",
       nameRequired: "El nombre es obligatorio",
+      backgroundConnectionUnavailable:
+        "No se pudieron mantener las conexiones en segundo plano. Vuelve a abrir la aplicación.",
       daemonUnavailable: "Daemonno disponible",
       daemonClientUnavailable: "ClienteDaemonno disponible",
       daemonClientDisconnected: "El clienteDaemonestá desconectado",
@@ -1857,6 +1859,11 @@ export const es: TranslationResources = {
     dontAskAgain: "no vuelvas a preguntar",
   },
   downloads: {
+    open: "Abrir",
+    share: "Compartir",
+    openFailed:
+      "No se pudo abrir este archivo. Instala una aplicación compatible o comparte el archivo.",
+    shareFailed: "No se pudo compartir este archivo. Inténtalo de nuevo.",
     requestTokenFailed: "No se pudo solicitar el token de descarga.",
     hostUnavailable: "El host de descarga no está disponible.",
     cancelled: "La descarga fue cancelada.",

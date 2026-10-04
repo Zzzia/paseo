@@ -2,6 +2,9 @@
 import { polyfillCrypto } from "./src/polyfills/crypto";
 polyfillCrypto();
 
+import { installRelayCrypto } from "./src/polyfills/relay-crypto";
+installRelayCrypto();
+
 // Polyfill screen.orientation for WebKitGTK desktop runtimes that lack the API.
 import { polyfillScreenOrientation } from "./src/polyfills/screen-orientation";
 polyfillScreenOrientation();

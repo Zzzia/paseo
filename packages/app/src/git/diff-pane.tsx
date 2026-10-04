@@ -1611,7 +1611,7 @@ export function ChangesSurface({
     }),
     [appSettings.monoFontFamily, codeFontSize, effectiveLayout, wrapLines],
   );
-  const downloadFile = useFileDownload({ serverId, workspaceId, workspaceRoot: cwd });
+  const downloadFile = useFileDownload({ serverId, workspaceRoot: cwd, onOpenFile });
   const handleCopyPath = useCallback(
     (path: string) => {
       void Clipboard.setStringAsync(

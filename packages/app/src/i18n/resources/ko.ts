@@ -62,6 +62,8 @@ export const ko: TranslationResources = {
       unableToSave: "저장할 수 없습니다",
       unableToCopy: "복사할 수 없습니다",
       nameRequired: "이름을 입력하세요",
+      backgroundConnectionUnavailable:
+        "백그라운드에서 호스트 연결을 유지할 수 없습니다. 앱을 다시 열어 재시도하세요.",
       daemonUnavailable: "데몬을 사용할 수 없습니다",
       daemonClientUnavailable: "데몬 클라이언트를 사용할 수 없습니다",
       daemonClientDisconnected: "데몬 클라이언트 연결이 끊어졌습니다",
@@ -1819,6 +1821,10 @@ export const ko: TranslationResources = {
     dontAskAgain: "다시 묻지 않기",
   },
   downloads: {
+    open: "열기",
+    share: "공유",
+    openFailed: "이 파일을 열 수 없습니다. 지원하는 앱을 설치하거나 파일을 공유하세요.",
+    shareFailed: "이 파일을 공유할 수 없습니다. 다시 시도하세요.",
     requestTokenFailed: "다운로드 토큰을 요청하지 못했습니다.",
     hostUnavailable: "다운로드 호스트를 사용할 수 없습니다.",
     cancelled: "다운로드가 취소되었습니다.",
