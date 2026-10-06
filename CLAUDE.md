@@ -39,6 +39,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/file-icons.md](docs/file-icons.md)                             | Material icon theme integration for the file explorer                                                                          |
 | [docs/file-downloads.md](docs/file-downloads.md)                     | 远端文件下载、原生外部打开及客户端更新要求                                                                                     |
 | [docs/known-limitations.md](docs/known-limitations.md)               | 当前已知限制与暂不处理的原因                                                                                                   |
+| [docs/macos-automation.md](docs/macos-automation.md)                 | macOS 自动化权限、个人安装版构建与签名要求                                                                                     |
 | [docs/providers.md](docs/providers.md)                               | Adding a new agent provider end-to-end                                                                                         |
 | [docs/forge-providers.md](docs/forge-providers.md)                   | Adding a git forge: registry/manifest, drop-in checklist, self-host/GHES, the two facts tiers                                  |
 | [docs/custom-providers.md](docs/custom-providers.md)                 | Custom provider config: Z.AI, Alibaba/Qwen, ACP agents, profiles, custom binaries                                              |
