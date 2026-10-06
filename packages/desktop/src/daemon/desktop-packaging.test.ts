@@ -63,6 +63,27 @@ function createFakeMacBundle(options: { includeHelper: boolean }): {
 }
 
 describe("desktop packaging", () => {
+  it("仅从用户仓库获取桌面更新", () => {
+    const config = readFileSync(join(packageRoot, "electron-builder.yml"), "utf8");
+    expect(config).toMatch(/publish:\n  provider: github\n  owner: Zzzia\n  repo: paseo/);
+  });
+
+  it("个人安装版缺少指定证书时明确失败", () => {
+    const env = { ...process.env };
+    delete env.PASEO_MAC_SIGN_IDENTITY;
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "require(process.argv[1]).default({}).catch(error => { console.error(error.message); process.exitCode = 1; });",
+        join(packageRoot, "scripts", "sign-macos-personal.cjs"),
+      ],
+      { env, encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("PASEO_MAC_SIGN_IDENTITY");
+  });
+
   it("uses an Electron runtime whose Squirrel handoff explicitly wakes ShipIt", () => {
     const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as {
       devDependencies?: Record<string, string>;
@@ -77,6 +98,18 @@ describe("desktop packaging", () => {
     const config = readFileSync(join(packageRoot, "electron-builder.yml"), "utf8");
 
     expect(config).toContain('minimumSystemVersion: "13.0.0"');
+  });
+
+  it("为代理发起的 Apple Events 声明签名权限和用途", () => {
+    const config = readFileSync(join(packageRoot, "electron-builder.yml"), "utf8");
+    const entitlements = readFileSync(join(packageRoot, "build", "entitlements.mac.plist"), "utf8");
+
+    // macOS 将代理子进程的自动化请求归属到 Paseo，缺少声明时连授权提示也会被拒绝。
+    expect(entitlements).toMatch(
+      /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\s*\/>/,
+    );
+    expect(config).toContain("entitlements: build/entitlements.mac.plist");
+    expect(config).toMatch(/\n  extendInfo:\n    NSAppleEventsUsageDescription: \S.+/);
   });
 
   it("unpacks server zsh shell integration files for external shells", () => {

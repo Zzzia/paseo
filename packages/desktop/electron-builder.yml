@@ -37,7 +37,7 @@ extraResources:
     to: editor-target-icons
 publish:
   provider: github
-  owner: getpaseo
+  owner: Zzzia
   repo: paseo
 mac:
   artifactName: "Paseo-${version}-${arch}.${ext}"
@@ -48,6 +48,8 @@ mac:
   notarize: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
+  extendInfo:
+    NSAppleEventsUsageDescription: Paseo 需要允许你启动的 AI 代理通过自动化操作其他应用。
   extraResources:
     - from: bin/paseo
       to: bin/paseo
