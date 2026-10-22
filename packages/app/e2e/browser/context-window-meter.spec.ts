@@ -149,7 +149,7 @@ for (const layout of [
           await expect(details.getByText(/tokens$/)).toHaveCount(0);
           const account = usageCard(details, "login-journey:account");
           await expect(account.getByText("Session", { exact: true })).toBeVisible();
-          await expect(account.getByText("31%", { exact: true })).toBeVisible();
+          await expect(account.getByText("31% used", { exact: true })).toBeVisible();
           await qaScreenshot(page, `context-without-data-${layout.name}`);
           await layout.close(page);
         });
@@ -161,7 +161,7 @@ for (const layout of [
           await expect(details.getByText("32k / 128k tokens", { exact: true })).toBeVisible();
           await expect(details.getByText("No context data", { exact: true })).toHaveCount(0);
           await expect(
-            usageCard(details, "login-journey:account").getByText("31%", { exact: true }),
+            usageCard(details, "login-journey:account").getByText("31% used", { exact: true }),
           ).toBeVisible();
         });
       } finally {
@@ -268,10 +268,16 @@ for (const theme of ["light", "dark"] as const) {
       await expect(card).toBeVisible();
     });
 
-    await test.step("Refresh replaces the card with the source's new report", async () => {
-      usage.answerNext([expiredLogin(onWorkLogin(claude!))]);
+    await test.step("Refresh keeps the card open and replaces it with the new report", async () => {
+      const refreshed = gate();
+      usage.answerNext({ stream: [refreshed.promise, expiredLogin(onWorkLogin(claude!))] });
       const card = contextWindowDetails(page);
       await refreshUsageCard(card, "Claude");
+      await expect(card.getByRole("button", { name: "Refresh Claude" })).toBeDisabled();
+      // Past the card's close grace, with the pointer still on the card.
+      await page.waitForTimeout(500);
+      await expect(card).toBeVisible();
+      refreshed.open();
       await expect(card.getByText(LOGIN_EXPIRED)).toBeVisible();
       expect(usage.refreshedAgents()).toEqual([agent.agentId]);
     });

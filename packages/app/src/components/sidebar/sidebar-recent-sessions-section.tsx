@@ -1,6 +1,7 @@
+import { SidebarSectionHeader } from "./sidebar-section-header";
 import { memo, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Text, View } from "react-native";
+import { View } from "react-native";
 import type { HostBadgeModel } from "@/hosts/appearance";
 import { useHostBadges } from "@/hosts/use-host-badges";
 import {
@@ -16,7 +17,6 @@ import { useHostFeatureMap } from "@/runtime/host-features";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { useSidebarRowItems } from "./display-preferences/model";
-import { styles } from "./left-sidebar-styles";
 import { useSidebarModel } from "./sidebar-model";
 import type { SidebarRecentSession } from "./sidebar-recent-sessions";
 import { MemoSidebarWorkspaceRow } from "./sidebar-workspace-row";
@@ -90,9 +90,7 @@ export function SidebarRecentSessionsSection({ onSessionPress }: { onSessionPres
   if (rows.length === 0) return null;
   return (
     <View testID="sidebar-recent-section">
-      <View style={styles.workspacesSectionHeader}>
-        <Text style={styles.workspacesSectionTitle}>{t("agentList.dateSections.recent")}</Text>
-      </View>
+      <SidebarSectionHeader title={t("agentList.dateSections.recent")} />
       {rows.map(({ session, workspace }) => (
         <RecentWorkspaceRow
           key={workspace.workspaceKey}

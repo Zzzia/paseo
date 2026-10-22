@@ -1,6 +1,5 @@
 import React, { useMemo, type CSSProperties } from "react";
 import { ParseError, renderToString } from "katex";
-import "katex/dist/katex.min.css";
 import type { StyleProp, TextStyle } from "react-native";
 const DISPLAY_STYLE: CSSProperties = {
   display: "block",
@@ -30,7 +29,7 @@ export function MathFormula({ expression, source, displayMode }: MathFormulaProp
     try {
       const html = renderToString(compactExpression, {
         displayMode,
-        output: "htmlAndMathml",
+        output: "mathml",
         throwOnError: false,
         trust: false,
       });

@@ -1,4 +1,4 @@
-import { CircleGauge, FolderPlus, Server, Settings } from "lucide-react-native";
+import { CircleGauge, FolderPlus, Server, Settings, type LucideIcon } from "lucide-react-native";
 import { useCallback, useRef, useState, type RefObject } from "react";
 import { Pressable, Text, View } from "react-native";
 import { HostPicker } from "@/components/hosts/host-picker";
@@ -16,10 +16,10 @@ import {
   useHasUsageSummary,
   useOpenSidebarUsage,
 } from "@/usage";
-import { useIsCompactFormFactor } from "@/constants/layout";
-import type { SidebarTheme } from "./left-sidebar-props";
 import { styles } from "./left-sidebar-styles";
 
+import { SidebarFooterIconHighlight } from "./sidebar-footer-icon-highlight";
+import { DensityIcon } from "@/components/ui/density-icon";
 function sidebarHostOptionTestID(serverId: string): string {
   return `sidebar-host-row-${serverId}`;
 }
@@ -29,30 +29,25 @@ function FooterIconButton({
   onPress,
   testID,
   label,
-  icon: Icon,
+  icon,
   iconSizeAdjustment = 0,
   shortcutKeys,
-  theme,
 }: {
   onPress: () => void;
   testID: string;
   label: string;
-  icon: typeof FolderPlus;
+  icon: LucideIcon;
   /** Only for a glyph that reads larger than the others at the same size. */
   iconSizeAdjustment?: number;
   shortcutKeys?: ReturnType<typeof useShortcutKeys>;
-  theme: SidebarTheme;
   buttonRef?: RefObject<View | null>;
 }) {
-  const isCompact = useIsCompactFormFactor();
-  const iconSize = isCompact ? theme.iconSize.lg : theme.iconSize.md;
-
   return (
     <Tooltip delayDuration={300}>
       <TooltipTrigger asChild>
         <Pressable
           ref={buttonRef}
-          style={styles.footerIconButton(isCompact)}
+          style={styles.footerIconButton}
           testID={testID}
           nativeID={testID}
           collapsable={false}
@@ -61,11 +56,16 @@ function FooterIconButton({
           accessibilityRole="button"
           onPress={onPress}
         >
-          {({ hovered }) => (
-            <Icon
-              size={iconSize + iconSizeAdjustment}
-              color={hovered ? theme.colors.foreground : theme.colors.foregroundMuted}
-            />
+          {({ hovered, pressed }) => (
+            <>
+              <SidebarFooterIconHighlight visible={pressed} />
+              <DensityIcon
+                icon={icon}
+                size="md"
+                sizeAdjustment={iconSizeAdjustment}
+                color={hovered ? "foreground" : "foregroundMuted"}
+              />
+            </>
           )}
         </Pressable>
       </TooltipTrigger>
@@ -77,12 +77,10 @@ function FooterIconButton({
 }
 
 function SidebarHostPicker({
-  theme,
   label,
   onAddHost,
   onOpenHostSettings,
 }: {
-  theme: SidebarTheme;
   label: string;
   onAddHost: () => void;
   onOpenHostSettings: (serverId: string) => void;
@@ -126,7 +124,6 @@ function SidebarHostPicker({
         icon={Server}
         // Server's two boxes fill more of the square than the other glyphs.
         iconSizeAdjustment={-1}
-        theme={theme}
       />
     </HostPicker>
   );
@@ -148,7 +145,6 @@ export function IconTooltipContent({
 }
 
 export function SidebarFooter({
-  theme,
   handleOpenProject,
   handleSettings,
   labels,
@@ -156,7 +152,6 @@ export function SidebarFooter({
   handleOpenHostSettings,
   onBeforeNavigate,
 }: {
-  theme: SidebarTheme;
   handleOpenProject: () => void;
   handleSettings: () => void;
   labels: {
@@ -185,11 +180,9 @@ export function SidebarFooter({
             label={labels.addProject}
             icon={FolderPlus}
             shortcutKeys={newAgentKeys}
-            theme={theme}
           />
-          <SidebarUsageIcon label={labels.usage} theme={theme} />
+          <SidebarUsageIcon label={labels.usage} />
           <SidebarHostPicker
-            theme={theme}
             label={labels.hosts}
             onAddHost={handleAddHost}
             onOpenHostSettings={handleOpenHostSettings}
@@ -202,7 +195,6 @@ export function SidebarFooter({
             label={labels.settings}
             icon={Settings}
             shortcutKeys={settingsKeys}
-            theme={theme}
           />
         </View>
       </View>
@@ -210,7 +202,7 @@ export function SidebarFooter({
   );
 }
 
-function SidebarUsageIcon({ label, theme }: { label: string; theme: SidebarTheme }) {
+function SidebarUsageIcon({ label }: { label: string }) {
   const openUsage = useOpenSidebarUsage();
   return (
     <FooterIconButton
@@ -218,7 +210,6 @@ function SidebarUsageIcon({ label, theme }: { label: string; theme: SidebarTheme
       testID="sidebar-usage-icon"
       label={label}
       icon={CircleGauge}
-      theme={theme}
     />
   );
 }

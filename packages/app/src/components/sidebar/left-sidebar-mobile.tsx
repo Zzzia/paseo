@@ -1,6 +1,6 @@
-import { X } from "lucide-react-native";
+import { SidebarCloseButton } from "@/components/headers/sidebar-close-button";
 import { useCallback, useMemo } from "react";
-import { Pressable, View } from "react-native";
+import { View } from "react-native";
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
 import { useSidebarViewStore } from "@/stores/sidebar-view-store";
 import { WindowChromeSafeArea } from "@/utils/desktop-window";
@@ -47,9 +47,23 @@ export function MobileSidebar({
   const handleWorkspacePress = useCallback(() => {
     closeSidebar();
   }, [closeSidebar]);
+
   const listHeader = useMemo(
     () => <SidebarListHeader onSessionPress={handleWorkspacePress} />,
     [handleWorkspacePress],
+  );
+
+  const closeButton = useMemo(
+    () => (
+      <SidebarCloseButton
+        label={labels.closeSidebar}
+        onPress={closeSidebar}
+        testID="sidebar-close"
+        nativeID="sidebar-close"
+        style={styles.mobileCloseButton}
+      />
+    ),
+    [labels.closeSidebar, closeSidebar],
   );
 
   const mobileSidebarInsetStyle = useMemo(
@@ -69,30 +83,11 @@ export function MobileSidebar({
     >
       <View style={styles.sidebarContent} pointerEvents="auto">
         <WindowChromeSafeArea placement="below" />
-        <SidebarNavRows style={styles.sidebarHeaderGroup} onBeforeNavigate={closeSidebar} />
-        <WindowChromeSafeArea
-          placement="inline"
-          pointerEvents="box-none"
-          style={styles.mobileCloseButtonRow}
-        >
-          <Pressable
-            style={styles.mobileCloseButton}
-            onPress={closeSidebar}
-            testID="sidebar-close"
-            nativeID="sidebar-close"
-            accessible
-            accessibilityRole="button"
-            accessibilityLabel={labels.closeSidebar}
-            hitSlop={8}
-          >
-            {({ hovered, pressed }) => (
-              <X
-                size={theme.iconSize.md}
-                color={hovered || pressed ? theme.colors.foreground : theme.colors.foregroundMuted}
-              />
-            )}
-          </Pressable>
-        </WindowChromeSafeArea>
+        <SidebarNavRows
+          style={styles.sidebarHeaderGroup}
+          onBeforeNavigate={closeSidebar}
+          firstRowTrailing={closeButton}
+        />
 
         {isInitialLoad && !hasActiveHostFilter ? (
           <SidebarAgentListSkeleton />
@@ -121,7 +116,6 @@ export function MobileSidebar({
         )}
 
         <SidebarFooter
-          theme={theme}
           handleOpenProject={handleOpenProject}
           handleSettings={handleSettings}
           labels={labels}

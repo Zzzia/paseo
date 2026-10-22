@@ -117,8 +117,8 @@ function isEscaped(source: string, position: number): boolean {
   return backslashCount % 2 === 1;
 }
 
-export function findUnescapedDelimiter(source: string, delimiter: string): number {
-  let searchStart = 0;
+export function findUnescapedDelimiter(source: string, delimiter: string, start = 0): number {
+  let searchStart = start;
 
   while (searchStart < source.length) {
     const delimiterStart = source.indexOf(delimiter, searchStart);

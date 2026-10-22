@@ -61,61 +61,103 @@ Gradle auto-fetches the platform/build-tools it needs once licenses are accepted
 
 ## Local build + install
 
+The locked `expo-modules-core@57.0.23` needs the patch installed by `npm install`.
+It backports
+[Expo's Activity-result launcher fix](https://github.com/expo/expo/pull/49634): changing
+font size or another unhandled configuration can otherwise disable image selection
+until the app process restarts. Rebuild the native app after changing this patch;
+a Metro reload cannot update it. Remove the patch when the installed
+`expo-modules-core` includes the fix.
+
+Run its native regression tests from `packages/app/android` after prebuild:
+
+```bash
+./gradlew :expo-modules-core:testDebugUnitTest \
+  --tests expo.modules.kotlin.activityresult.AppContextActivityResultRegistryRecreationTest \
+  --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
+```
+
 From repo root:
 
 ```bash
-npm run android:development    # Debug build
-npm run android:production     # Release build
-npm run android:clear          # Remove generated Android project
+npm run build:apk       # Universal dogfood APK: 32/64-bit ARM and x86
+npm run build:apk:arm64 # Smaller dogfood APK for ARM64 phones
+npm run dev:android     # Build/install the debug app and start development
+npm run dev:ios         # Build/install the iOS development app
 ```
 
-For a production-ID release APK that local Android profiling tools can attach to:
+`build:apk` writes `artifacts/paseo-dogfood-universal.apk`; `build:apk:arm64` writes
+`artifacts/paseo-dogfood-arm64.apk`. Neither command launches or installs on a device. Both enable
+`PASEO_WATCHDOG_BUILD=1`, the production React profiling renderer, and Android's shell-profileable
+flag. These builds keep the production package ID (`sh.paseo`) and release optimizations. Use this APK for
+personal dogfooding. Android system-trace spans require the separate `PASEO_PROFILE_BUILD=1` flag;
+watchdog recording does not send duplicate spans to that sink by default. Normal store/release
+workflows leave diagnostics disabled.
+
+The older `android`, `android:development`, and `ios` commands remain aliases for development.
+`android:production` still builds and installs a release through Expo; use `build:apk` when you
+need an artifact. `android:clear` removes the generated Android project.
+
+Run `npm run test:android --workspace=@getpaseo/app` to prebuild Android and run native module unit tests. The app CI job runs this command with the Android toolchain.
+
+### Diagnostic logs without ADB
+
+In a dogfood build, open Android's Files app → Downloads → **Paseo diagnostics** and share all
+retained `.jsonl` files. No app screen, storage permission, or attached debugger is required.
+The recorder retains eight files of about 5 MiB each across reconnects and app restarts. Rotation
+replaces the oldest files, so collect them soon after reproducing a freeze. Uninstall/reinstall
+can leave older Downloads files that the new installation cannot manage.
+
+Each file identifies its build and session. Events include application-transport frame sizes and
+message/request IDs, connection transitions, parse/validation/dispatch spans, named React subtree
+render timings, and foreground JS heartbeat gaps. Payloads, passwords, and message contents
+are excluded; connection identifiers include host addresses. Each size has a unit: **bytes** when
+already available, otherwise **UTF-16 code units** for text. These are
+client transport observations, after relay decryption where applicable, not packet arrival times.
+
+The native recorder flags a heartbeat overdue by more than 500 ms (250 ms expected interval).
+A heartbeat gap bounds the unresponsive interval; it is not an exact blocked-stack duration.
+Backgrounding suspends detection. `js.stall.started` can be written while JS remains blocked;
+`js.stall.recovered` records the gap when JS resumes. Recovery can appear without a start event
+when JS resumes before the next native sampling tick. Process death leaves earlier files intact,
+but queued/unflushed records can be lost. A missing recovery event alone does not prove a crash.
+
+`react.render.slow` records subtree rendering taking at least 16 ms; one-second summaries include
+faster renders. Nested profiler timings overlap: don't add parent and child times. React's render
+measurements do not measure native layout/paint or the complete commit phase. `recorder.dropped`
+means the bounded queue overflowed; missing events in that interval must not be treated as absence
+of activity. Storage failure stops recording rather than blocking the app.
+
+For an ordinary release APK with system trace markers only:
 
 ```bash
 PASEO_PROFILE_BUILD=1 npm run android:production
 ```
 
-This keeps the `sh.paseo` package id, release Hermes bundle, and release optimizations. It adds
-`<profileable android:shell="true" />` and enables local Android trace markers for workspace mounts
-and daemon WebSocket traffic. The markers contain message types and sizes, never payload contents,
-and emit only while a system trace records the `sh.paseo` app (`perfetto -a sh.paseo ...`).
-
-Or from `packages/app`:
-
-```bash
-# Debug
-npx cross-env APP_VARIANT=development expo prebuild --platform android --clean --non-interactive
-npx cross-env APP_VARIANT=development expo run:android --variant=debug
-
-# Release
-npx cross-env APP_VARIANT=production expo prebuild --platform android --clean --non-interactive
-npx cross-env APP_VARIANT=production expo run:android --variant=release
-
-# Clear generated Android project
-rm -rf android
-```
+Those markers emit only while a system trace records `sh.paseo` (`perfetto -a sh.paseo ...`);
+they do not produce Downloads files.
 
 ## 后台主机连接
 
 配置主机后，安卓客户端从前台启动 `connectedDevice` 前台服务，显示低优先级常驻通知。切到其他应用时继续使用已有连接、心跳、更新订阅和下载，已打开的聊天和当前文件继续同步；回前台先检查连接，健康连接继续使用，不因前后台切换而重复补拉聊天，实际断线才重新连接和恢复数据。服务和后台任务复用应用运行时，不创建第二套客户端，不要求升级 daemon 或 relay。
 
-服务必须同时持有 Headless JS 任务。React Native 0.81.5 在 Activity 暂停时停用 JavaScript 定时器；只提高进程优先级仍会停止心跳，导致服务端连接租约过期。任务随着服务结束而完成，释放唤醒锁。移除最后一个主机、通知中的“停止后台运行”或从最近任务中移除应用会结束后台保护；再次进入前台可恢复。
+服务必须同时持有 Headless JS 任务。React Native 0.86.3 在 Activity 暂停时停用 JavaScript 定时器；只提高进程优先级仍会停止心跳，导致服务端连接租约过期。任务随着服务结束而完成，释放唤醒锁。移除最后一个主机、通知中的“停止后台运行”或从最近任务中移除应用会结束后台保护；再次进入前台可恢复。
 
 大文件与控制回复共享连接，慢速传输可能延迟探测回复。有后台执行支持时，不因为切后台释放当前文件订阅；前台健康探测超时也不能忽略期间收到的有效数据，否则会错误关闭正在下载的连接。
 
 Android 的深度休眠仍会限制网络。需要长时间熄屏保持连接时，在系统电池设置中将 Paseo 设为“不受限制”；部分厂商还需要允许后台运行。应用不自行绕过用户的省电设置。正常切换应用无需这项授权。
 
-接口依据：[Android 前台服务类型及前置权限](https://developer.android.com/develop/background-work/services/fgs/service-types)、[React Native 0.81 Headless JS](https://reactnative.dev/docs/0.81/headless-js-android)、安装的 `JavaTimerManager` 和 `HeadlessJsTaskService` 源码。`CHANGE_NETWORK_STATE` 满足网络设备连接服务的声明前置条件，不会改动用户网络路线。系统省电边界见 [Android Doze](https://developer.android.com/training/monitoring-device-state/doze-standby)。
+接口依据：[Android 前台服务类型及前置权限](https://developer.android.com/develop/background-work/services/fgs/service-types)、[React Native Headless JS](https://reactnative.dev/docs/headless-js-android)、安装的 `JavaTimerManager` 和 `HeadlessJsTaskService` 源码。`CHANGE_NETWORK_STATE` 满足网络设备连接服务的声明前置条件，不会改动用户网络路线。系统省电边界见 [Android Doze](https://developer.android.com/training/monitoring-device-state/doze-standby)。
 
 ## 原生二进制接收
 
-原生应用的 WebSocket 工厂使用原生 Base64 解码。上游 React Native 0.81.5 在 JavaScript 中解码桥接的二进制帧，当前通过版本绑定的 `patch-package` 补丁提供每个连接的解码器选项，避免改写全局 Base64 函数。
+原生应用的 WebSocket 工厂使用原生 Base64 解码。上游 React Native 0.86.3 在 JavaScript 中解码桥接的二进制帧，当前通过版本绑定的 `patch-package` 补丁提供每个连接的解码器选项，避免改写全局 Base64 函数。
 
 探测连接和常规重连都必须使用应用 WebSocket 工厂。启动时探测成功的客户端会直接成为活动客户端；只在重连入口注入工厂，会让首次连接仍走 JavaScript 解码，持续下载时占住手势与取消所需的执行时间。
 
 保留依赖安装的 postinstall。若使用 `npm ci --ignore-scripts`，在项目根目录执行 `npm run postinstall` 后再构建；应用会检查补丁能力，缺少补丁时明确报错。升级 React Native 时重新验证这个补丁；上游具备等价的原生字节接收能力后才能移除。
 
-接口依据：[React Native 0.81.5 WebSocket 源码](https://github.com/facebook/react-native/blob/v0.81.5/packages/react-native/Libraries/WebSocket/WebSocket.js)、安装的 `react-native-libsodium` 1.7.0。解码器选项是本仓库补丁新增的接口。完整应用必须验证加密连接与文件完整性，解码跑分不能替代实际公网下载；更新要求见 [远端文件下载](file-downloads.md)。
+接口依据：[React Native 0.86.3 WebSocket 源码](https://github.com/facebook/react-native/blob/v0.86.3/packages/react-native/Libraries/WebSocket/WebSocket.js)、安装的 `react-native-libsodium` 1.7.0。解码器选项是本仓库补丁新增的接口。完整应用必须验证加密连接与文件完整性，解码跑分不能替代实际公网下载；更新要求见 [远端文件下载](file-downloads.md)。
 
 ## Running on an emulator against a worktree daemon
 
@@ -146,7 +188,9 @@ This is the Android counterpart of the iOS local-simulator flow in [development.
 
 Android focus and selection visibility requests must not reposition inverted timelines. The
 `modules/paseo-scroll` package keeps React Native's scroll manager interface and returns zero for
-child-reveal scroll calculations when the vertical scale is inverted. Dragging and explicit scroll
+child-reveal scroll calculations when the view's transform matrix inverts the vertical axis. React
+Native's Android list uses `scale: -1`, which decomposes into a 180-degree rotation with positive
+`scaleY`; checking the scale property alone misses it. Dragging and explicit scroll
 commands still work; non-inverted scroll views keep Android's default behavior.
 
 Register this package before React Native's core package through its Expo config plugin. Normal
@@ -213,7 +257,7 @@ Beta releases are an explicit no-op: they do not create or rewrite F-Droid chang
 
 ### React version lockstep
 
-Keep `react` and `react-dom` pinned to the React version embedded by the current `react-native` release. React Native `0.81.x` embeds `react-native-renderer` `19.1.0`, so `packages/app` must use React `19.1.0`. Bumping React to a newer patch can build successfully but crash at JS startup on Android with `Incompatible React versions`, leaving the app on the native splash screen.
+Keep `react` and `react-dom` pinned to the React version embedded by the current `react-native` release. React Native `0.86.3` embeds `react-native-renderer` `19.2.3`, so `packages/app` must use React `19.2.3`. Bumping React to a newer patch can build successfully but crash at JS startup on Android with `Incompatible React versions`, leaving the app on the native splash screen.
 
 ## Screenshots
 
@@ -225,12 +269,12 @@ adb exec-out screencap -p > screenshot.png
 
 Stable tag pushes like `v0.1.0` trigger:
 
-- The EAS GitHub app on Expo servers (iOS + Android production builds + store submit). There is no workflow file in this repo for it.
+- The EAS GitHub app on Expo servers, using `packages/app/.eas/workflows/release-mobile.yml` (iOS + Android production builds and distribution).
 - `.github/workflows/android-apk-release.yml` on GitHub Actions (APK asset on GitHub Release).
 
-iOS auto-submits to App Store review via a Fastlane lane after EAS uploads to TestFlight. Android auto-submits to the Play Store via EAS-managed credentials.
+iOS distributes the same build to external TestFlight testers and App Store review; see [Mobile builds (EAS)](release.md#mobile-builds-eas) for the review paths. Android auto-submits to the Play Store via EAS-managed credentials.
 
-Beta tags like `v0.1.1-beta.1` only trigger the GitHub APK workflow. They publish a GitHub prerelease APK for testing and do not submit to the stores.
+Beta tags like `v0.1.1-beta.1` trigger the GitHub APK workflow and EAS `Release iOS Beta`. They publish a GitHub prerelease APK and distribute iOS through TestFlight without submitting to production stores.
 
 `android-v*` tags also trigger only the GitHub APK workflow — useful when you want to ship an APK without going through stores. The GitHub APK workflow supports `workflow_dispatch` with an existing `tag` input so you can rebuild without cutting a new tag.
 

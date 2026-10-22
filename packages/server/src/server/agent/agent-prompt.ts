@@ -1,3 +1,9 @@
+import type { WaitForFinishResult } from "@getpaseo/client/internal/daemon-client";
+import {
+  prepareAgentMessage,
+  type AgentPromptSource,
+  type AgentMessageDelivery,
+} from "./agent-messages/index.js";
 import type { Logger } from "pino";
 
 import type {
@@ -9,7 +15,10 @@ import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  getParentAgentIdFromLabels,
+  getParentAddressFromLabels,
+} from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
@@ -27,6 +36,8 @@ export type AgentRunController = Pick<
 };
 
 export interface StartAgentRunOptions {
+  /** Called after selecting the run, before consuming its events. */
+  onDispatch?: (disposition: PromptDispatchDisposition) => void;
   replaceRunning?: boolean;
   activeTurnBehavior?: ActiveTurnBehavior;
   runOptions?: AgentRunOptions;
@@ -113,6 +124,7 @@ export async function startAgentRun(
   // in-flight turn — replaceAgentRun would interrupt the running turn. The
   // intercept lives at this layer so it covers every prompt entrypoint.
   if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
+    options?.onDispatch?.("out_of_band");
     return { disposition: "out_of_band" };
   }
   try {
@@ -137,6 +149,7 @@ async function startAgentRunInner(
   const snapshot = agentManager.getAgent(agentId);
   const steered = await steerOrReplaceActiveRun(agentManager, agentId, prompt, options);
   if (steered?.disposition === "steered") {
+    options?.onDispatch?.("steered");
     return steered;
   }
   const { iterator, replaced } = steered
@@ -151,6 +164,7 @@ async function startAgentRunInner(
     },
     "agent.session.start_stream.iterator_returned",
   );
+  options?.onDispatch?.("turn_started");
   void (async () => {
     try {
       try {
@@ -206,27 +220,14 @@ export async function unarchiveAgentState(
   return true;
 }
 
-/**
- * Wrap a body in <paseo-system>…</paseo-system> so the receiving agent
- * recognizes the prompt as system-injected context — not a user turn.
- * Used by chat mentions, schedule fires, and notify-on-finish.
- */
-export function formatSystemNotificationPrompt(reason: string): string {
-  return `<paseo-system>\n${reason}\n</paseo-system>`;
-}
-
-const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;
-
-export function isSystemInjectedEnvelope(text: string): boolean {
-  return SYSTEM_ENVELOPE_PATTERN.test(text);
-}
-
 export interface SendPromptToAgentParams {
+  onDispatch?: StartAgentRunOptions["onDispatch"];
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   agentId: string;
   /** Prompt to dispatch to the provider (may include image blocks or wrapped text). */
   prompt: AgentPromptInput;
+  source?: AgentPromptSource;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
   runOptions?: AgentRunOptions;
@@ -244,10 +245,12 @@ export interface SendPromptToAgentParams {
 }
 
 export interface StartCreatedAgentInitialPromptParams {
+  agentStorage: AgentStorage;
   agentManager: AgentManager;
   agentId: string;
   snapshot?: ManagedAgent;
   prompt: AgentPromptInput | null;
+  source?: AgentPromptSource;
   runOptions?: AgentRunOptions;
   logger: Logger;
 }
@@ -292,6 +295,18 @@ export async function waitForAgentRunStartWithTimeout(
   }
 }
 
+async function resolvePromptSource(
+  source: AgentPromptSource | undefined,
+  manager: Pick<AgentManager, "getAgent">,
+  storage: AgentStorage,
+): Promise<AgentPromptSource | undefined> {
+  if (!source || source.title) return source;
+  const title = (
+    manager.getAgent(source.agentId)?.config.title ?? (await storage.get(source.agentId))?.title
+  )?.trim();
+  return title ? { ...source, title } : source;
+}
+
 /**
  * Full send-prompt orchestration: (optional unarchive) → load → (optional
  * mode change) → start run.
@@ -306,35 +321,59 @@ export async function waitForAgentRunStartWithTimeout(
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
+  const source = await resolvePromptSource(params.source, params.agentManager, params.agentStorage);
+  const delivery = prepareAgentMessage(params.prompt, source, params.messageId);
+  return sendPreparedPromptToAgent({
+    ...params,
+    prompt: delivery.prompt,
+    runOptions: delivery.messageId
+      ? { ...params.runOptions, clientMessageId: delivery.messageId }
+      : params.runOptions,
+  });
+}
+
+/** Dispatch daemon-prepared context without reclassifying it as human input. */
+export async function sendPreparedPromptToAgent(
+  params: Omit<SendPromptToAgentParams, "source" | "messageId">,
+): Promise<{ disposition: PromptDispatchDisposition }> {
   const unarchive = params.unarchive ?? true;
 
   const record = await params.agentStorage.get(params.agentId);
+  let archivedAtToRestore: string | null = null;
   if (record?.archivedAt) {
     if (!unarchive) {
       return { disposition: "turn_started" };
     }
-    await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
+    if (await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId)) {
+      archivedAtToRestore = record.archivedAt;
+    }
   }
 
-  await ensureAgentLoaded(params.agentId, {
-    agentManager: params.agentManager,
-    agentStorage: params.agentStorage,
-    logger: params.logger,
-  });
+  try {
+    await ensureAgentLoaded(params.agentId, {
+      agentManager: params.agentManager,
+      agentStorage: params.agentStorage,
+      logger: params.logger,
+    });
+  } catch (error) {
+    // A send that could not load the agent leaves it where it was: still archived.
+    // Concurrent sends share this load, so none of them holds a live session.
+    if (archivedAtToRestore) {
+      await params.agentManager.archiveSnapshot(params.agentId, archivedAtToRestore);
+    }
+    throw error;
+  }
 
   if (params.sessionMode) {
     await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
   }
 
-  const runOptions = params.messageId
-    ? { ...params.runOptions, clientMessageId: params.messageId }
-    : params.runOptions;
-
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
     replaceRunning: true,
+    onDispatch: params.onDispatch,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
-    runOptions,
+    runOptions: params.runOptions,
   });
 }
 
@@ -350,14 +389,17 @@ export async function startCreatedAgentInitialPrompt(
     return currentSnapshot;
   }
 
+  const delivery = prepareAgentMessage(
+    params.prompt,
+    await resolvePromptSource(params.source, params.agentManager, params.agentStorage),
+    params.runOptions?.clientMessageId,
+  );
   const dispatchResult = await startAgentRun(
     params.agentManager,
     params.agentId,
-    params.prompt,
+    delivery.prompt,
     params.logger,
-    {
-      runOptions: params.runOptions,
-    },
+    { runOptions: { ...params.runOptions, clientMessageId: delivery.messageId } },
   );
 
   if (dispatchResult.disposition === "turn_started") {
@@ -372,20 +414,41 @@ export async function startCreatedAgentInitialPrompt(
 }
 
 export interface SetupFinishNotificationParams {
+  agentMessages: AgentMessageDelivery;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   childAgentId: string;
   callerAgentId: string;
+  childServerId?: string;
   requireParentOwnership?: boolean;
+  /** Retain pre-dispatch outcomes only when dispatch keeps the existing turn. */
+  dispatchResult?: Promise<PromptDispatchDisposition | false>;
+  /** A replacement must observe its new start, not the displaced running snapshot. */
+  waitForTurnStart?: boolean;
   logger: Logger;
 }
 
-type FinishNotificationReason = "finished" | "errored" | "needs permission" | "was closed";
+type FinishNotificationReason =
+  | "finished"
+  | "errored"
+  | "needs permission"
+  | "was closed"
+  | "was canceled";
+
+const finishNotificationEvents = {
+  finished: "finished",
+  errored: "errored",
+  "needs permission": "permission-required",
+  "was closed": "closed",
+  // Use the existing failure event so older clients still parse agent-message metadata.
+  "was canceled": "errored",
+} as const;
 
 const FINISH_NOTIFICATION_MESSAGE_LIMIT = 4000;
 
 interface FinishNotificationBodyInput {
   childAgentId: string;
+  serverId?: string;
   title: string;
   reason: FinishNotificationReason;
   lastAssistantMessage: string | null;
@@ -395,12 +458,14 @@ interface FinishNotificationBodyInput {
 function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
   const statusLine = `Agent ${params.childAgentId} (${params.title}) ${params.reason}.`;
   const sections = [statusLine];
+  if (params.serverId) sections.push(`Server: ${params.serverId}`);
   if (params.reason === "needs permission" && params.permissionRequest) {
     sections.push(
       "Respond with `respond_to_permission` using the `agentId` and `requestId` below.",
       `<permission-request>\n${JSON.stringify(
         {
           agentId: params.childAgentId,
+          ...(params.serverId ? { serverId: params.serverId } : {}),
           requestId: params.permissionRequest.id,
           request: params.permissionRequest,
         },
@@ -425,21 +490,124 @@ interface NotifySafelyOptions {
   permissionRequest?: AgentPermissionRequest;
 }
 
-// A caller waits on a child through one armed notification. Arming again, such as a
-// follow-up prompt while the child still runs, replaces the earlier one so the child's
-// next finish reaches the caller once.
-const armedFinishNotifications = new WeakMap<AgentManager, Map<string, () => void>>();
+// Pending follow-ups coexist until acknowledgement. A successful dispatch replaces
+// every earlier observation for the caller/child pair; a failure removes only itself.
+interface ArmedFinishNotification {
+  stop(): void;
+  supersedeWhen(accepted: Promise<boolean>): void;
+}
 
-export function setupFinishNotification(params: SetupFinishNotificationParams): void {
+const armedFinishNotifications = new WeakMap<
+  AgentManager,
+  Map<string, Set<ArmedFinishNotification>>
+>();
+
+/** Creation waits and accepted follow-ups share notification ownership. */
+export function setupFinishWait(params: {
+  agentMessages: AgentMessageDelivery;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  originServerId?: string;
+  childServerId?: string;
+  childAgentId: string;
+  callerAgentId: string;
+  wait(signal: AbortSignal): Promise<WaitForFinishResult>;
+  afterPermission(requestId: string, signal: AbortSignal): Promise<void>;
+  logger: Logger;
+}): () => void {
+  const controller = new AbortController();
+  const byManager =
+    armedFinishNotifications.get(params.agentManager) ??
+    new Map<string, Set<ArmedFinishNotification>>();
+  armedFinishNotifications.set(params.agentManager, byManager);
+  const key = JSON.stringify([
+    params.childServerId ?? null,
+    params.childAgentId,
+    params.callerAgentId,
+  ]);
+  const registrations = byManager.get(key) ?? new Set<ArmedFinishNotification>();
+  byManager.set(key, registrations);
+  for (const previous of registrations) previous.stop();
+  byManager.set(key, registrations);
+  let superseded = Promise.resolve(false);
+  const stop = () => {
+    controller.abort();
+    registrations.delete(registration);
+    if (registrations.size === 0 && byManager.get(key) === registrations) byManager.delete(key);
+  };
+  const registration: ArmedFinishNotification = {
+    stop,
+    supersedeWhen(accepted) {
+      superseded = superseded.then(async (prior) => prior || (await accepted));
+    },
+  };
+  registrations.add(registration);
+  async function watch(): Promise<void> {
+    while (!controller.signal.aborted) {
+      const result = await params.wait(controller.signal);
+      if (controller.signal.aborted || (await superseded) || result.status === "timeout") return;
+      const parent = getParentAddressFromLabels(
+        result.final?.labels,
+        params.childServerId ?? "self",
+      );
+      if (
+        parent?.agentId !== params.callerAgentId ||
+        parent.serverId !== (params.originServerId ?? "self")
+      )
+        return;
+      if ((await params.agentStorage.get(params.callerAgentId))?.archivedAt) return;
+      const reason = { idle: "finished", error: "errored", permission: "needs permission" }[
+        result.status
+      ] as FinishNotificationReason;
+      const permissionRequest = result.final?.pendingPermissions[0];
+      params.agentMessages.enqueue({
+        recipientId: params.callerAgentId,
+        prompt: formatFinishNotificationBody({
+          childAgentId: params.childAgentId,
+          serverId: params.childServerId,
+          title: result.final?.title ?? params.childAgentId,
+          reason,
+          lastAssistantMessage: result.lastMessage,
+          permissionRequest,
+        }),
+        source: {
+          kind: "agent-notification",
+          agentId: params.childAgentId,
+          serverId: params.childServerId,
+          title: result.final?.title ?? params.childAgentId,
+          event: finishNotificationEvents[reason],
+        },
+        activeTurnBehavior: "steer",
+        unarchive: false,
+      });
+      if (result.status !== "permission" || !permissionRequest) return;
+      await params.afterPermission(permissionRequest.id, controller.signal);
+    }
+  }
+  void watch()
+    .catch((error) => {
+      if (!controller.signal.aborted)
+        params.logger.warn(
+          { err: error, agentId: params.childAgentId },
+          "Child finish wait stopped",
+        );
+    })
+    .finally(stop);
+  return stop;
+}
+
+export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {
   const {
     agentManager,
     agentStorage,
     childAgentId,
     callerAgentId,
     requireParentOwnership = false,
+    waitForTurnStart = false,
     logger,
   } = params;
   let hasSeenRunning = false;
+  let hasSeenTurn = false;
   let stopped = false;
   const notifiedPermissionRequestIds = new Set<string>();
   let unsubscribe: (() => void) | null = null;
@@ -447,16 +615,50 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
 
   const armedByManager = armedFinishNotifications.get(agentManager) ?? new Map();
   armedFinishNotifications.set(agentManager, armedByManager);
-  const armedKey = JSON.stringify([childAgentId, callerAgentId]);
-  armedByManager.get(armedKey)?.();
-  armedByManager.set(armedKey, stop);
+  const armedKey = JSON.stringify([params.childServerId ?? null, childAgentId, callerAgentId]);
+  const registrations = armedByManager.get(armedKey) ?? new Set<ArmedFinishNotification>();
+  armedByManager.set(armedKey, registrations);
+  const previous = [...registrations];
+  let superseded = Promise.resolve(false);
+  let dispatchPending = Boolean(params.dispatchResult);
+  const registration: ArmedFinishNotification = {
+    stop,
+    supersedeWhen(accepted) {
+      superseded = superseded.then(
+        async (alreadySuperseded) => alreadySuperseded || (await accepted),
+      );
+    },
+  };
+  registrations.add(registration);
+  if (params.dispatchResult) {
+    const dispatchAccepted = params.dispatchResult.then((result) => result !== false);
+    for (const observer of previous) observer.supersedeWhen(dispatchAccepted);
+    void params.dispatchResult.then((accepted) => {
+      dispatchPending = false;
+      if (accepted) {
+        for (const observer of previous) observer.stop();
+        if (stopped || accepted === "turn_started") stop();
+      } else {
+        stop();
+      }
+      return undefined;
+    });
+  } else {
+    for (const observer of previous) {
+      observer.supersedeWhen(Promise.resolve(true));
+      observer.stop();
+    }
+  }
 
   function stop(): void {
-    if (stopped) return;
     stopped = true;
     unsubscribe?.();
-    if (armedByManager.get(armedKey) === stop) {
-      armedByManager.delete(armedKey);
+    // Pending observations remain visible to overlapping sends until acknowledgement.
+    if (!dispatchPending) {
+      registrations.delete(registration);
+      if (registrations.size === 0 && armedByManager.get(armedKey) === registrations) {
+        armedByManager.delete(armedKey);
+      }
     }
   }
 
@@ -464,6 +666,11 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     reason: FinishNotificationReason,
     permissionRequest?: AgentPermissionRequest,
   ): Promise<void> {
+    if (params.dispatchResult) {
+      const result = await params.dispatchResult;
+      if (result === false || result === "turn_started") return;
+    }
+    if (await superseded) return;
     const callerRecord = await agentStorage.get(callerAgentId);
     if (callerRecord?.archivedAt) {
       return;
@@ -483,14 +690,17 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       permissionRequest,
     });
 
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
-      agentId: callerAgentId,
-      prompt: formatSystemNotificationPrompt(body),
+    params.agentMessages.enqueue({
+      recipientId: callerAgentId,
+      prompt: body,
+      source: {
+        kind: "agent-notification",
+        agentId: childAgentId,
+        title,
+        event: finishNotificationEvents[reason],
+      },
       activeTurnBehavior: "steer",
       unarchive: false,
-      logger,
     });
   }
 
@@ -507,6 +717,35 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       });
   }
 
+  function observeState(agent: ManagedAgent): void {
+    for (const requestId of notifiedPermissionRequestIds) {
+      if (!agent.pendingPermissions.has(requestId)) {
+        notifiedPermissionRequestIds.delete(requestId);
+      }
+    }
+    if (agent.lifecycle === "running") {
+      if (waitForTurnStart && !hasSeenTurn) return;
+      hasSeenTurn = true;
+      if (agent.pendingPermissions.size === 0) {
+        hasSeenRunning = true;
+      }
+      return;
+    }
+    // Prior terminal state is not this task's outcome. A failure before turn start
+    // is reported by the dispatch acknowledgement instead of a finish callback.
+    if (agent.lifecycle === "error" && hasSeenTurn) {
+      notifySafely("errored");
+      return;
+    }
+    // Idle is published before the terminal stream event for both completion
+    // and cancellation. Let that event identify the outcome instead.
+    if (agent.lifecycle === "closed") {
+      notifySafely("was closed");
+      return;
+    }
+    return;
+  }
+
   unsubscribe = agentManager.subscribe(
     (event) => {
       if (stopped) {
@@ -514,33 +753,29 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       }
 
       if (event.type === "agent_state") {
-        for (const requestId of notifiedPermissionRequestIds) {
-          if (!event.agent.pendingPermissions.has(requestId)) {
-            notifiedPermissionRequestIds.delete(requestId);
-          }
-        }
-        if (event.agent.lifecycle === "running") {
-          if (event.agent.pendingPermissions.size === 0) {
-            hasSeenRunning = true;
-          }
-          return;
-        }
-        if (event.agent.lifecycle === "error") {
-          notifySafely("errored");
-          return;
-        }
-        if (event.agent.lifecycle === "idle" && hasSeenRunning) {
-          notifySafely("finished");
-          return;
-        }
-        if (event.agent.lifecycle === "closed") {
-          notifySafely("was closed");
-          return;
-        }
+        observeState(event.agent);
         return;
       }
 
       if (event.type === "timeline_replacement") {
+        return;
+      }
+
+      if (event.event.type === "turn_started") {
+        hasSeenTurn = true;
+        hasSeenRunning = true;
+        return;
+      }
+
+      if (event.event.type === "turn_completed" || event.event.type === "turn_canceled") {
+        // Replacing a turn keeps the child running through the displaced turn's
+        // cancellation. The task settles only when the child becomes idle.
+        if (agentManager.getAgent(childAgentId)?.lifecycle !== "idle") return;
+        if (event.event.type === "turn_completed" && hasSeenRunning) {
+          notifySafely("finished");
+        } else if (event.event.type === "turn_canceled" && hasSeenTurn) {
+          notifySafely("was canceled");
+        }
         return;
       }
 
@@ -578,11 +813,11 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   const childSnapshot = agentManager.getAgent(childAgentId);
   if (!childSnapshot || childSnapshot.lifecycle === "closed") {
     stop();
-    return;
+    return stop;
   }
-  if (childSnapshot.lifecycle === "running") {
+  if (childSnapshot.lifecycle === "running" && !waitForTurnStart) {
+    hasSeenTurn = true;
     hasSeenRunning = true;
-  } else if (childSnapshot.lifecycle === "error") {
-    notifySafely("errored");
   }
+  return stop;
 }

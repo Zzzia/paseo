@@ -203,9 +203,11 @@ test.describe("Model B sidebar shape", () => {
         cwd: seeded.repoPath,
         workspaceId: seeded.workspaceId,
         title: "之前的聊天",
+        initialPrompt: "用于验证之前的聊天",
         modeId: "load-test",
         model: "e2e-fast-stream",
       });
+      await seeded.client.waitForFinish(previous.id, 15_000);
       const latest = await seeded.client.createAgent({
         provider: "mock",
         cwd: seeded.repoPath,
@@ -221,7 +223,9 @@ test.describe("Model B sidebar shape", () => {
       await expect(page.getByText(prompt, { exact: true }).first()).toBeVisible();
       await seeded.client.waitForFinish(latest.id, 15_000);
       await openAgentRoute(page, { workspaceId: seeded.workspaceId, agentId: previous.id });
-      await expect(page.getByTestId("workspace-tab-switcher-trigger")).toContainText("之前的聊天");
+      await expect(
+        page.getByText("用于验证之前的聊天", { exact: true }).filter({ visible: true }),
+      ).toBeVisible();
       await openMobileAgentSidebar(page);
       await expect(recentWorkspaceRow(page, seeded.workspaceId)).toContainText(
         seeded.workspaceName,
@@ -239,9 +243,7 @@ test.describe("Model B sidebar shape", () => {
       await page.screenshot({ path: "../../.note/goal-recent-sessions/recent-mobile.png" });
       await recentWorkspaceRow(page, seeded.workspaceId).click();
       await expectMobileAgentSidebarHidden(page);
-      await expect(page.getByTestId("workspace-tab-switcher-trigger")).toContainText(
-        "最近发送的聊天",
-      );
+      await expect(page.getByText(prompt, { exact: true }).filter({ visible: true })).toBeVisible();
       await expectComposerVisible(page);
     } finally {
       await seeded.cleanup();

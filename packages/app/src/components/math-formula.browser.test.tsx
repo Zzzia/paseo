@@ -11,7 +11,7 @@ describe("MathFormula", () => {
       <MathFormula expression="E = mc^2" source="$E = mc^2$" displayMode={false} />,
     );
 
-    expect(container.querySelector(".katex-html")?.textContent).toContain("E=mc2");
+    expect(container.querySelector("math")?.textContent).toContain("E=mc2");
     expect(container.querySelector("math")?.getAttribute("aria-hidden")).not.toBe("true");
     expect(container.querySelector("[aria-label='$E = mc^2$']")).not.toBeNull();
   });
@@ -28,7 +28,7 @@ describe("MathFormula", () => {
     expect(container.querySelector("math")?.getAttribute("display")).not.toBe("block");
     expect(container.querySelector("mfrac")).not.toBeNull();
     expect(container.querySelector("annotation")?.textContent).not.toContain("\\displaystyle");
-    expect(container.querySelector(".frac-line")).not.toBeNull();
+    expect(container.querySelector("msqrt")).not.toBeNull();
   });
 
   it("keeps invalid LaTeX visible instead of throwing", () => {
