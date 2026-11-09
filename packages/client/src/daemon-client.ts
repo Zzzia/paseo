@@ -1,4 +1,8 @@
 import {
+  ChunkedTransport,
+  ChunkedTransportProtocolError,
+} from "@getpaseo/protocol/chunked-transport";
+import {
   HOST_ROUTE_OPCODE,
   encodeHostRouteFrame,
   decodeHostRouteFrame,
@@ -20,6 +24,7 @@ import { CreationClient } from "./creation/index.js";
 import type { CreationSnapshot } from "@getpaseo/protocol/messages";
 import type { z } from "zod";
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type { LocalSpeechModel } from "@getpaseo/protocol/speech/rpc-schemas";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
 import { MAX_WEBSOCKET_MESSAGE_BYTES } from "@getpaseo/protocol/websocket-message-limit";
@@ -163,10 +168,11 @@ import {
 } from "@getpaseo/protocol/binary-frames/index";
 import {
   createRelayE2eeTransportFactory,
-  createRelayTransportFactory,
+  createRelayUpgradeTransportFactory,
   createWebSocketTransportFactory,
   decodeMessageData,
   defaultWebSocketFactory,
+  describeEndpointSecurityClose,
   describeTransportClose,
   describeTransportError,
   type DaemonTransport,
@@ -395,6 +401,20 @@ export type DaemonEventHandler = (event: DaemonEvent) => void;
 export type BrowserAutomationExecuteRequestMessage = BrowserAutomationExecuteRequest;
 export type BrowserAutomationExecuteResponseMessage = BrowserAutomationExecuteResponse;
 
+export interface PluginClientBundle {
+  id: string;
+  clientBundleHash: string;
+  clientBundle: string;
+}
+
+/** Host-scoped storage. load must return only bundles whose contents have been verified. */
+export interface PluginClientBundleStore {
+  load(): Promise<PluginClientBundle[]>;
+  replace(bundles: PluginClientBundle[]): Promise<void>;
+}
+/** Endpoint security negotiated on a relay connection. See docs/relay-endpoint-security.md. */
+export type RelaySecurityMode = "legacy" | "protected";
+
 export interface DaemonClientConfig {
   /** Deliver compact bodies/hash references to a caller-owned snapshot cache.
    * The default keeps public SDK snapshot entries expanded. */
@@ -402,6 +422,8 @@ export interface DaemonClientConfig {
   sessionPermissions?: import("@getpaseo/protocol/messages").DaemonPermission[];
   url: string;
   clientId: string;
+  /** Create one cache for the confirmed daemon identity, retained for this client lifetime. */
+  createPluginClientBundleStore?: (serverId: string) => PluginClientBundleStore;
   clientType?: "mobile" | "browser" | "cli" | "mcp" | "hub";
   appVersion?: string;
   runtimeGeneration?: number | null;
@@ -416,6 +438,10 @@ export interface DaemonClientConfig {
   e2ee?: {
     enabled?: boolean;
     daemonPublicKeyB64?: string;
+    /** Refuse connections whose negotiated endpoint security is below this mode. */
+    minimumMode?: RelaySecurityMode;
+    /** Called with the negotiated mode after each authenticated relay handshake. */
+    onSecurityMode?: (mode: RelaySecurityMode) => void;
   };
   reconnect?: {
     enabled?: boolean;
@@ -678,6 +704,8 @@ export interface FetchAgentOptions {
 }
 type LegacyFetchAgentOptions = Omit<FetchAgentOptions, "agentId">;
 export interface FetchAgentTimelineOptions {
+  /** Prefer whole-turn pages when supported; older hosts retain item-based paging. */
+  wholeTurns?: boolean;
   direction?: FetchAgentTimelineDirection;
   cursor?: FetchAgentTimelineCursor;
   limit?: number;
@@ -758,6 +786,9 @@ type ShutdownRequestedStatusPayload = z.infer<typeof ShutdownRequestedStatusPayl
 export interface ShutdownServerOptions {
   requestId?: string;
   timeout?: number;
+  // Leave terminals running for the next daemon. Only daemons advertising
+  // `features.terminalsSurviveRestart` honor it; check before sending.
+  keepTerminals?: boolean;
 }
 export interface DaemonStatusOptions {
   requestId?: string;
@@ -839,6 +870,14 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type ProjectSuggestionsPayload = Extract<
+  SessionOutboundMessage,
+  { type: "project.suggestions.response" }
+>["payload"];
+export type ProjectSuggestionsOptions = Omit<
+  Extract<SessionInboundMessage, { type: "project.suggestions.request" }>,
+  "type" | "requestId"
+> & { requestId?: string };
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -1005,6 +1044,12 @@ type CorrelatedResponsePayloads = {
 };
 type CorrelatedResponsePayload<TType extends CorrelatedResponseType> =
   CorrelatedResponsePayloads[TType];
+
+type PluginCatalogResponseEntry =
+  CorrelatedResponsePayload<"plugin.catalog.get.response">["plugins"][number];
+export type PluginCatalogEntry = Omit<PluginCatalogResponseEntry, "clientBundle"> & {
+  clientBundle: string;
+};
 
 export class DaemonConnectionError extends Error {
   readonly serverId?: string;
@@ -1234,7 +1279,7 @@ function toReasonCode(reason: string | null | undefined): string | null {
 }
 
 interface PendingSend {
-  send: () => void;
+  send: () => void | Promise<void>;
   resolve: () => void;
   reject: (error: Error) => void;
   timeoutHandle: ReturnType<typeof setTimeout>;
@@ -1255,6 +1300,36 @@ interface PingProbe {
 // COMPAT(providerUsageList): added in v0.1.98, remove after 2027-03-26.
 export function supportsUsageReports(features: ServerInfoStatusPayload["features"]): boolean {
   return features?.usageSources === true || features?.providerUsageList === true;
+}
+
+export class TerminalKeepUnsupportedError extends Error {
+  readonly code = "TERMINALS_KEEP_UNSUPPORTED";
+  // Own fields reach the CLI's JSON error output, which desktop reads.
+  readonly version: string | null;
+
+  constructor(target: string, version: string | null) {
+    super(
+      `The daemon at ${target}${version ? ` (v${version})` : ""} closes terminals when it stops. Update it first, or run \`paseo daemon stop\` to stop it and close them.`,
+    );
+    this.name = "TerminalKeepUnsupportedError";
+    this.version = version;
+  }
+}
+
+/**
+ * Gate for an explicit "keep terminals" stop. Older daemons drop `keepTerminals` and close the
+ * terminals anyway, so read the capability on the connection that will carry the shutdown and
+ * refuse before sending it.
+ */
+// COMPAT(terminalsSurviveRestart): added in v0.12.0, remove gate after 2027-04-21.
+export function requireTerminalKeepCapability(
+  client: Pick<DaemonClient, "getLastServerInfoMessage">,
+  target: string,
+): void {
+  const serverInfo = client.getLastServerInfoMessage();
+  if (serverInfo?.features?.terminalsSurviveRestart !== true) {
+    throw new TerminalKeepUnsupportedError(target, serverInfo?.version ?? null);
+  }
 }
 
 function buildFetchAgentsRequest(
@@ -1304,6 +1379,7 @@ export class DaemonClient {
     failed: (error) => this.logger.error({ err: error }, "Subscription failed"),
   });
   private transport: DaemonTransport | null = null;
+  private chunkedTransport: ChunkedTransport | null = null;
   private helloAuth: HelloAuth;
   private transportCleanup: Array<() => void> = [];
   private rawMessageListeners: Set<(message: SessionOutboundMessage) => void> = new Set();
@@ -1334,8 +1410,23 @@ export class DaemonClient {
   private fileDownloads = new FileDownloads();
   private activeBinaryFileTransfers = new Map<string, BinaryFileTransferState>();
   private completedBinaryFileReads = new Map<string, FileReadResult>();
+  /** The last catalog's client bundles by plugin id, so later catalogs can leave them out. */
+  private pluginClientBundles = new Map<
+    string,
+    { clientBundleHash: string; clientBundle: string }
+  >();
+  private pluginClientBundleStore: PluginClientBundleStore | undefined;
+  private pluginClientBundlesLoaded: Promise<void> | undefined;
+  private pluginClientBundlesWrite: PluginClientBundle[] | undefined;
+  private pluginClientBundlesWriting = false;
   private logger: Logger;
   private pendingSendQueue: PendingSend[] = [];
+  /**
+   * Lowest relay endpoint security this client accepts on its next attempt.
+   * Starts at the configured minimum and rises to "protected" once a daemon
+   * negotiates it, so a later reconnect cannot be downgraded to legacy.
+   */
+  private relaySecurityFloorValue: RelaySecurityMode | undefined;
   private readonly logConnectionPath: "direct" | "relay";
   private readonly logServerId: string | null;
   private readonly logClientIdHash: string;
@@ -1352,6 +1443,7 @@ export class DaemonClient {
 
   constructor(private config: DaemonClientConfig) {
     this.logger = config.logger ?? consoleLogger;
+    this.relaySecurityFloorValue = config.e2ee?.minimumMode;
     this.logConnectionPath = isRelayClientWebSocketUrl(this.config.url) ? "relay" : "direct";
     let parsedUrlForLog: URL | null = null;
     try {
@@ -1453,14 +1545,15 @@ export class DaemonClient {
         this.config.transportFactory ??
         createWebSocketTransportFactory(this.config.webSocketFactory ?? defaultWebSocketFactory);
       const isRelayTransport = isRelayClientWebSocketUrl(this.config.url);
-      const shouldUseRelayE2ee = this.config.e2ee?.enabled === true && isRelayTransport;
       this.assertEncryptedRelayAuth(selected.helloAuth, isRelayTransport);
 
+      // Relay upgrades are routing only: credentials never reach the relay socket.
       let transportFactory = isRelayTransport
-        ? createRelayTransportFactory(baseTransportFactory)
+        ? createRelayUpgradeTransportFactory(baseTransportFactory)
         : baseTransportFactory;
-      if (shouldUseRelayE2ee) {
-        const daemonPublicKeyB64 = this.config.e2ee?.daemonPublicKeyB64;
+      // Endpoint security is selected by configuration, never inferred from the URL.
+      if (this.config.e2ee?.enabled === true) {
+        const daemonPublicKeyB64 = this.config.e2ee.daemonPublicKeyB64;
         if (!daemonPublicKeyB64) {
           throw new Error("daemonPublicKeyB64 is required for relay E2EE");
         }
@@ -1468,6 +1561,11 @@ export class DaemonClient {
           baseFactory: transportFactory,
           daemonPublicKeyB64,
           logger: this.logger,
+          ...(this.relaySecurityFloorValue ? { minimumMode: this.relaySecurityFloorValue } : {}),
+          onSecurityMode: (mode) => {
+            if (mode === "protected") this.relaySecurityFloorValue = "protected";
+            this.config.e2ee?.onSecurityMode?.(mode);
+          },
         });
       }
       const transportUrl = this.resolveTransportUrlForAttempt();
@@ -1478,6 +1576,17 @@ export class DaemonClient {
       });
       this.traceConnectionAttempt += 1;
       this.transport = transport;
+      this.chunkedTransport = new ChunkedTransport({
+        get supportsDrain() {
+          return transport.supportsDrain;
+        },
+        get frameBytes() {
+          return transport.maxFrameBytes ?? 32 * 1024 * 1024;
+        },
+        send: (frame) => transport.send(frame),
+        onFailure: () => transport.close(4003, "Transport send failed"),
+        deliver: (frame) => this.handleTransportMessage(frame),
+      });
       this.lastServerInfoMessage = null;
       this.authFailureReasonValue = null;
 
@@ -1525,9 +1634,12 @@ export class DaemonClient {
             this.pendingGenericTransportErrorTimeout = null;
           }
           this.authFailureReasonValue ??= authFailureFromLegacyClose(event);
+          // An endpoint security policy close cannot be fixed by retrying.
+          const securityFailure = describeEndpointSecurityClose(event);
+          if (securityFailure) this.setReconnectEnabled(false);
           const reason = this.authFailureReasonValue
             ? new DaemonAuthenticationError(this.authFailureReasonValue).message
-            : describeTransportClose(event);
+            : (securityFailure ?? describeTransportClose(event));
           if (reason) {
             this.lastErrorValue = reason;
           }
@@ -1581,7 +1693,16 @@ export class DaemonClient {
           });
         }),
         transport.onMessage((data) => {
-          if (this.transport === transport) this.handleTransportMessage(data);
+          if (this.transport !== transport) return;
+          const bytes = asUint8Array(data);
+          try {
+            if (typeof data === "string" || bytes)
+              this.chunkedTransport!.receive(typeof data === "string" ? data : bytes!);
+            else this.handleTransportMessage(data);
+          } catch (error) {
+            if (!(error instanceof ChunkedTransportProtocolError)) throw error;
+            transport.close(4003, "Invalid chunked transport");
+          }
         }),
       ];
     } catch (error) {
@@ -1785,9 +1906,9 @@ export class DaemonClient {
       })
     ).routeId;
   }
-  sendHostFrame(routeId: string, data: string | Uint8Array): void {
+  sendHostFrame(routeId: string, data: string | Uint8Array): Promise<void> {
     if (typeof data === "string") {
-      this.sendSessionMessageStrict({
+      return this.sendSessionMessageStrict({
         type: "hosts.route.frame.request",
         routeId,
         data,
@@ -1795,7 +1916,7 @@ export class DaemonClient {
       });
     } else {
       if (!this.isConnected || !this.transport) throw this.unavailableError();
-      this.sendTransportFrame(encodeHostRouteFrame(routeId, data));
+      return this.sendTransportFrame(encodeHostRouteFrame(routeId, data));
     }
   }
   private readonly hostFrameListeners = new Set<(frame: HostRouteFrame) => void>();
@@ -1832,6 +1953,11 @@ export class DaemonClient {
     return this.connectionState.status === "connecting";
   }
 
+  /** The relay endpoint security this client requires on its next attempt. */
+  get relaySecurityFloor(): RelaySecurityMode | undefined {
+    return this.relaySecurityFloorValue;
+  }
+
   get lastError(): string | null {
     return this.lastErrorValue;
   }
@@ -1847,6 +1973,11 @@ export class DaemonClient {
   // ============================================================================
   // Message Subscription
   // ============================================================================
+
+  /** Drain capability inherited by transports routed through this connection. */
+  get supportsDrain(): boolean {
+    return this.transport?.supportsDrain !== false;
+  }
 
   subscribe(handler: DaemonEventHandler): () => void {
     this.eventListeners.add(handler);
@@ -1956,7 +2087,7 @@ export class DaemonClient {
     messageType: string,
     message: unknown,
     submitted?: () => void,
-  ): void {
+  ): Promise<void> {
     const isOpen =
       this.config.trace?.isEnabled() === true &&
       this.beginTraceSection("paseo.ws.message.outbound", {
@@ -1965,25 +2096,30 @@ export class DaemonClient {
         ...describeRequestIdentity(message),
       });
     try {
-      this.sendTransportFrame(JSON.stringify(message), submitted);
+      return this.sendTransportFrame(JSON.stringify(message), submitted);
     } finally {
       this.endTraceSection(isOpen);
     }
   }
 
-  private sendSessionPayload(payload: SessionInboundMessage): void {
-    this.sendJsonMessage("session", payload.type, { type: "session", message: payload }, () => {
-      if (!("requestId" in payload) || typeof payload.requestId !== "string") return;
-      for (const waiter of this.waiters) {
-        if (waiter.requestId === payload.requestId) waiter.submitted = true;
-      }
-    });
+  private sendSessionPayload(payload: SessionInboundMessage): Promise<void> {
+    return this.sendJsonMessage(
+      "session",
+      payload.type,
+      { type: "session", message: payload },
+      () => {
+        if (!("requestId" in payload) || typeof payload.requestId !== "string") return;
+        for (const waiter of this.waiters) {
+          if (waiter.requestId === payload.requestId) waiter.submitted = true;
+        }
+      },
+    );
   }
 
   private sendTransportFrame(
     frame: string | Uint8Array | ArrayBuffer,
     submitted?: () => void,
-  ): void {
+  ): Promise<void> {
     if (!this.transport) {
       throw this.unavailableError();
     }
@@ -1996,7 +2132,8 @@ export class DaemonClient {
     });
     try {
       submitted?.();
-      this.transport.send(frame);
+      const payload = typeof frame === "string" ? frame : asUint8Array(frame)!;
+      return this.chunkedTransport!.send(payload);
     } finally {
       this.endTraceSection(isOpen);
     }
@@ -2025,10 +2162,10 @@ export class DaemonClient {
     }
   }
 
-  private sendBinaryFrame(frame: Uint8Array): void {
+  private sendBinaryFrame(frame: Uint8Array): Promise<void> {
     if (!this.transport || this.connectionState.status !== "connected") {
       if (this.config.suppressSendErrors) {
-        return;
+        return Promise.resolve();
       }
       throw new Error(`Transport not connected (status: ${this.connectionState.status})`);
     }
@@ -2037,10 +2174,10 @@ export class DaemonClient {
         envelopeType: "binary",
         messageType: "binary",
       });
-      this.sendTransportFrame(frame);
+      return this.sendTransportFrame(frame);
     } catch (error) {
       if (this.config.suppressSendErrors) {
-        return;
+        return Promise.resolve();
       }
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -2055,7 +2192,7 @@ export class DaemonClient {
   private sendSessionMessageOrThrow(message: SessionInboundMessage): Promise<void> {
     return this.sendWhenConnected(() => {
       const payload = SessionInboundMessageSchema.parse(message);
-      this.sendSessionPayload(payload);
+      return this.sendSessionPayload(payload);
     });
   }
 
@@ -2064,13 +2201,12 @@ export class DaemonClient {
     return this.sendWhenConnected(() => undefined);
   }
 
-  private sendWhenConnected(send: () => void): Promise<void> {
+  private sendWhenConnected(send: () => void | Promise<void>): Promise<void> {
     const status = this.connectionState.status;
 
     // If connected, send immediately
     if (this.transport && status === "connected") {
-      send();
-      return Promise.resolve();
+      return Promise.resolve(send());
     }
 
     // If connecting, queue the message to be sent once connected
@@ -2109,8 +2245,7 @@ export class DaemonClient {
       clearTimeout(pending.timeoutHandle);
       try {
         if (this.transport && this.connectionState.status === "connected") {
-          pending.send();
-          pending.resolve();
+          void Promise.resolve(pending.send()).then(pending.resolve, pending.reject);
         } else {
           pending.reject(new DaemonConnectionError("Connection lost before message could be sent"));
         }
@@ -2166,19 +2301,17 @@ export class DaemonClient {
       { ...params.options, requestId: params.requestId },
     );
 
+    // The response deadline still applies while the transport waits for drain.
+    void promise.catch(() => undefined);
     try {
-      await this.sendSessionMessageOrThrow(wire.message);
+      const sent = this.sendSessionMessageOrThrow(wire.message);
+      const result = await Promise.race([promise, sent.then(() => promise)]);
+      if (result.kind === "error") throw result.error;
+      return result.value;
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       cancel(err);
-      void promise.catch(() => undefined);
       throw err;
-    }
-
-    try {
-      const result = await promise;
-      if (result.kind === "error") throw result.error;
-      return result.value;
     } finally {
       await wire.finish();
     }
@@ -2268,13 +2401,13 @@ export class DaemonClient {
     });
   }
 
-  private sendSessionMessageStrict(message: SessionInboundMessage): void {
+  private sendSessionMessageStrict(message: SessionInboundMessage): Promise<void> {
     if (!this.transport || this.connectionState.status !== "connected") {
       throw this.unavailableError();
     }
     const payload = SessionInboundMessageSchema.parse(message);
     try {
-      this.sendSessionPayload(payload);
+      return this.sendSessionPayload(payload);
     } catch (error) {
       throw error instanceof Error ? error : new Error(String(error));
     }
@@ -2472,15 +2605,16 @@ export class DaemonClient {
     };
     this.pingProbe = probe;
 
-    try {
-      this.sendJsonMessage("ping", "ping", { type: "ping" });
-    } catch (error) {
-      this.clearPingProbe();
+    const rejectSend = (error: unknown) => {
+      if (this.pingProbe !== probe) return;
       const sendError = error instanceof Error ? error : new Error(String(error));
-      if (probe.drivesLivenessFailure) {
-        this.recordLivenessFailure(sendError);
-      }
-      return Promise.reject(sendError);
+      this.rejectPingProbe(sendError);
+      if (probe.drivesLivenessFailure) this.recordLivenessFailure(sendError);
+    };
+    try {
+      void this.sendJsonMessage("ping", "ping", { type: "ping" }).catch(rejectSend);
+    } catch (error) {
+      rejectSend(error);
     }
 
     return promise;
@@ -2852,6 +2986,19 @@ export class DaemonClient {
         if (msg.type !== "project.list.response") return null;
         if (msg.payload.requestId !== resolvedRequestId) return null;
         return msg.payload;
+      },
+    });
+  }
+
+  /** Repositories the user ran agent sessions in recently, grouped by main checkout. */
+  listProjectSuggestions(options?: ProjectSuggestionsOptions): Promise<ProjectSuggestionsPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"project.suggestions.response">({
+      requestId: options?.requestId,
+      message: {
+        type: "project.suggestions.request",
+        ...(options?.providers ? { providers: options.providers } : {}),
+        ...(options?.since ? { since: options.since } : {}),
+        ...(options?.limit ? { limit: options.limit } : {}),
       },
     });
   }
@@ -3524,9 +3671,15 @@ export class DaemonClient {
     agentId: string,
     options: FetchAgentTimelineOptions = {},
   ): Promise<FetchAgentTimelinePayload> {
+    // COMPAT(wholeTurnTimeline): added after v0.13.2 (#8010); remove after 2027-04-27 once the daemon floor supports whole-turn pages.
+    // Reading history predates this capability and must keep working on older hosts.
+    const supportsWholeTurns = this.lastServerInfoMessage?.features?.wholeTurnTimeline === true;
     const resolvedRequestId = this.createRequestId(options.requestId);
     const message = SessionInboundMessageSchema.parse({
       type: "fetch_agent_timeline_request",
+      ...(supportsWholeTurns && options.wholeTurns !== undefined
+        ? { wholeTurns: options.wholeTurns }
+        : {}),
       agentId,
       requestId: resolvedRequestId,
       ...(options.direction ? { direction: options.direction } : {}),
@@ -4011,13 +4164,14 @@ export class DaemonClient {
   async restartServer(
     reason?: string,
     requestId?: string,
-    options?: { timeout?: number },
+    options?: { timeout?: number; killTerminals?: boolean },
   ): Promise<RestartRequestedStatusPayload> {
     const resolvedRequestId = this.createRequestId(requestId);
     const message = SessionInboundMessageSchema.parse({
       type: "restart_server_request",
       ...(reason && reason.trim().length > 0 ? { reason } : {}),
       requestId: resolvedRequestId,
+      ...(options?.killTerminals ? { killTerminals: true } : {}),
     });
     return this.sendRequest({
       requestId: resolvedRequestId,
@@ -4045,6 +4199,7 @@ export class DaemonClient {
     const message = SessionInboundMessageSchema.parse({
       type: "shutdown_server_request",
       requestId: resolvedRequestId,
+      ...(options?.keepTerminals ? { keepTerminals: true } : {}),
     });
     return this.sendRequest({
       requestId: resolvedRequestId,
@@ -4127,7 +4282,7 @@ export class DaemonClient {
   }
 
   async sendVoiceAudioChunk(audio: string, format: string, isLast = false): Promise<void> {
-    this.sendSessionMessage({ type: "voice_audio_chunk", audio, format, isLast });
+    return this.sendSessionMessageStrict({ type: "voice_audio_chunk", audio, format, isLast });
   }
 
   async startDictationStream(dictationId: string, format: string): Promise<void> {
@@ -4168,8 +4323,13 @@ export class DaemonClient {
 
     const cleanupError = new Error("Cancelled dictation start waiter");
     try {
-      this.sendSessionMessageStrict({ type: "dictation_stream_start", dictationId, format });
-      await Promise.race([ackPromise, errorPromise]);
+      const sent = this.sendSessionMessageStrict({
+        type: "dictation_stream_start",
+        dictationId,
+        format,
+      });
+      const response = Promise.race([ackPromise, errorPromise]);
+      await Promise.race([response, sent.then(() => response)]);
     } finally {
       ack.cancel(cleanupError);
       streamError.cancel(cleanupError);
@@ -4304,12 +4464,17 @@ export class DaemonClient {
 
     const cleanupError = new Error("Cancelled dictation finish waiter");
     try {
-      this.sendSessionMessageStrict({ type: "dictation_stream_finish", dictationId, finalSeq });
-      const firstOutcome = await Promise.race([
+      const sent = this.sendSessionMessageStrict({
+        type: "dictation_stream_finish",
+        dictationId,
+        finalSeq,
+      });
+      const response = Promise.race([
         finalOutcomePromise,
         errorOutcomePromise,
         finishAcceptedOutcomePromise,
       ]);
+      const firstOutcome = await Promise.race([response, sent.then(() => response)]);
 
       if (firstOutcome.kind === "final") {
         return firstOutcome.payload;
@@ -5240,8 +5405,10 @@ export class DaemonClient {
         return undefined;
       },
     );
+    const sendFrame = (frame: Uint8Array) =>
+      Promise.race([this.sendBinaryFrame(frame), responsePromise]);
     try {
-      this.sendBinaryFrame(
+      await sendFrame(
         encodeFileTransferFrame({
           opcode: FileTransferOpcode.FileBegin,
           requestId: resolvedRequestId,
@@ -5255,6 +5422,7 @@ export class DaemonClient {
         }),
       );
 
+      if (settled) return await responsePromise;
       const chunkSize = input.chunkSize ?? 128 * 1024;
       for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
         // Native WebSocket.send encodes binary synchronously. Let rendering and
@@ -5264,7 +5432,7 @@ export class DaemonClient {
         if (this.transport !== uploadTransport || this.connectionState.status !== "connected") {
           throw new DaemonConnectionError("Connection changed during file upload");
         }
-        this.sendBinaryFrame(
+        await sendFrame(
           encodeFileTransferFrame({
             opcode: FileTransferOpcode.FileChunk,
             requestId: resolvedRequestId,
@@ -5273,7 +5441,7 @@ export class DaemonClient {
         );
       }
 
-      this.sendBinaryFrame(
+      await sendFrame(
         encodeFileTransferFrame({
           opcode: FileTransferOpcode.FileEnd,
           requestId: resolvedRequestId,
@@ -5539,6 +5707,34 @@ export class DaemonClient {
     });
   }
 
+  async listLocalSpeechModels(requestId?: string): Promise<LocalSpeechModel[]> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "speech.local_models.list.request" },
+      responseType: "speech.local_models.list.response",
+    });
+    if (payload.error) throw new Error(payload.error);
+    return payload.models;
+  }
+
+  async downloadLocalSpeechModel(modelId: string, requestId?: string): Promise<void> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "speech.local_models.download.request", modelId },
+      responseType: "speech.local_models.download.response",
+    });
+    if (payload.error) throw new Error(payload.error);
+  }
+
+  async deleteLocalSpeechModel(modelId: string, requestId?: string): Promise<void> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "speech.local_models.delete.request", modelId },
+      responseType: "speech.local_models.delete.response",
+    });
+    if (payload.error) throw new Error(payload.error);
+  }
+
   sendBrowserAutomationExecuteResponse(response: BrowserAutomationExecuteResponse): void {
     this.sendSessionMessageStrict(response);
   }
@@ -5748,14 +5944,82 @@ export class DaemonClient {
     });
   }
 
-  async getPluginCatalog() {
+  async getPluginCatalog(): Promise<PluginCatalogEntry[]> {
+    if (this.config.createPluginClientBundleStore && !this.pluginClientBundleStore) {
+      const serverInfo = this.getLastServerInfoMessage();
+      if (!serverInfo) throw new Error("Plugin catalog requires a connected host");
+      this.pluginClientBundleStore = this.config.createPluginClientBundleStore(serverInfo.serverId);
+    }
+    const store = this.pluginClientBundleStore;
+    if (store) {
+      this.pluginClientBundlesLoaded ??= store.load().then(
+        (bundles) => {
+          for (const { id, ...bundle } of bundles) this.pluginClientBundles.set(id, bundle);
+          return undefined;
+        },
+        (error) => this.logger.warn({ err: error }, "Failed to load plugin client bundles"),
+      );
+      await this.pluginClientBundlesLoaded;
+    }
     const requestId = this.createRequestId();
+    const cached = this.pluginClientBundles;
+    const cachedClientBundles = [...cached].map(([id, { clientBundleHash }]) => ({
+      id,
+      clientBundleHash,
+    }));
     const payload = await this.sendCorrelatedSessionRequest({
       requestId,
-      message: { type: "plugin.catalog.get.request", requestId },
+      message: {
+        type: "plugin.catalog.get.request",
+        requestId,
+        ...(cachedClientBundles.length > 0 ? { cachedClientBundles } : {}),
+      },
       responseType: "plugin.catalog.get.response",
     });
-    return payload.plugins;
+    const retained = new Map<string, { clientBundleHash: string; clientBundle: string }>();
+    const plugins = payload.plugins.map(({ clientBundle: sent, ...plugin }): PluginCatalogEntry => {
+      const previous = cached.get(plugin.id);
+      const clientBundle =
+        sent ??
+        (previous?.clientBundleHash === plugin.clientBundleHash
+          ? previous?.clientBundle
+          : undefined);
+      if (clientBundle === undefined) {
+        throw new Error(`Plugin catalog left out the client bundle for ${plugin.id}`);
+      }
+      // COMPAT(pluginCatalogBundleHash): introduced by PR #6732 (unreleased); remove after
+      // 2027-04-27 once the daemon floor includes bundle hashes. Older bundles are not retained.
+      if (plugin.clientBundleHash !== undefined) {
+        retained.set(plugin.id, { clientBundleHash: plugin.clientBundleHash, clientBundle });
+      }
+      return Object.assign(plugin, { clientBundle });
+    });
+    this.pluginClientBundles = retained;
+    if (store) {
+      this.pluginClientBundlesWrite = [...retained].map(([id, bundle]) =>
+        Object.assign({ id }, bundle),
+      );
+      void this.persistPluginClientBundles(store);
+    }
+    return plugins;
+  }
+
+  private async persistPluginClientBundles(store: PluginClientBundleStore): Promise<void> {
+    if (this.pluginClientBundlesWriting) return;
+    this.pluginClientBundlesWriting = true;
+    try {
+      while (this.pluginClientBundlesWrite) {
+        const bundles = this.pluginClientBundlesWrite;
+        this.pluginClientBundlesWrite = undefined;
+        try {
+          await store.replace(bundles);
+        } catch (error) {
+          this.logger.warn({ err: error }, "Failed to persist plugin client bundles");
+        }
+      }
+    } finally {
+      this.pluginClientBundlesWriting = false;
+    }
   }
 
   async listPlugins(): Promise<PluginListItem[]> {
@@ -6238,7 +6502,8 @@ export class DaemonClient {
   }
 
   /**
-   * Snapshot/restore and output arrive in receive. Subscribe to the returned handle
+   * Defaults to a full ANSI replay. Replay begin/data/end and live output arrive in receive.
+   * Subscribe to the returned handle
    * for terminal_stream_exit: payload.error means observation failure, not PTY exit.
    * Either outcome detaches this slot and releases the handle automatically.
    */
@@ -6257,7 +6522,7 @@ export class DaemonClient {
       {
         type: "subscribe_terminal_request",
         terminalId,
-        ...(options?.restore ? { restore: options.restore } : {}),
+        restore: options?.restore ?? { mode: "full-snapshot" },
       },
       options,
     );
@@ -6587,6 +6852,8 @@ export class DaemonClient {
   }
 
   private disposeTransport(code = 1001, reason = "Reconnecting"): void {
+    this.chunkedTransport?.close();
+    this.chunkedTransport = null;
     this.owned.disconnected();
     this.providerSnapshotUpdates.clear();
     this.stopLivenessHeartbeat();
@@ -7061,15 +7328,6 @@ export class DaemonClient {
     probe.resolve(perfNow() - probe.startedAt);
   }
 
-  private clearPingProbe(): void {
-    const probe = this.pingProbe;
-    if (!probe) {
-      return;
-    }
-    this.pingProbe = null;
-    clearTimeout(probe.timeoutHandle);
-  }
-
   private rejectPingProbe(error: Error): void {
     const probe = this.pingProbe;
     if (!probe) {
@@ -7127,6 +7385,10 @@ export class DaemonClient {
     if (consumerMessage.type === "status") {
       const serverInfo = parseServerInfoStatusPayload(consumerMessage.payload);
       if (serverInfo) {
+        if (this.chunkedTransport)
+          this.chunkedTransport.enabled =
+            serverInfo.features?.binaryChunkingV1 === true &&
+            this.config.capabilities?.[CLIENT_CAPS.binaryChunkingV1] !== false;
         this.lastServerInfoMessage = serverInfo;
         this.destinationServerId = serverInfo.serverId;
         this.connectionFailure = undefined;

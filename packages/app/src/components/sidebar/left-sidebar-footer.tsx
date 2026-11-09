@@ -10,12 +10,7 @@ import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { useHosts } from "@/runtime/host-runtime";
 import { PluginSidebarItem } from "@/plugins/sidebar-items";
 import { useSidebarNavItems } from "@/sidebar-nav/use-sidebar-nav-items";
-import {
-  UsageSidebarItem,
-  UsageSidebarRoot,
-  useHasUsageSummary,
-  useOpenSidebarUsage,
-} from "@/usage";
+import { UsageSidebarItem, UsageSidebarRoot, useUsageSummary, useOpenSidebarUsage } from "@/usage";
 import { styles } from "./left-sidebar-styles";
 
 import { SidebarFooterIconHighlight } from "./sidebar-footer-icon-highlight";
@@ -220,10 +215,10 @@ function SidebarUsageIcon({ label }: { label: string }) {
  */
 function SidebarFooterRows({ onBeforeNavigate }: { onBeforeNavigate?: () => void }) {
   const { items } = useSidebarNavItems("footer");
-  const hasUsageSummary = useHasUsageSummary();
+  const usageSummary = useUsageSummary();
   const rowsRef = useRef<View | null>(null);
   const visibleItems = items.filter(
-    (item) => item.visible && (item.kind === "plugin" || hasUsageSummary),
+    (item) => item.visible && (item.kind === "plugin" || usageSummary.length > 0),
   );
   if (visibleItems.length === 0) return null;
   return (
@@ -239,7 +234,7 @@ function SidebarFooterRows({ onBeforeNavigate }: { onBeforeNavigate?: () => void
               onBeforeNavigate={onBeforeNavigate}
             />
           ) : (
-            <UsageSidebarItem key={item.key} />
+            <UsageSidebarItem key={item.key} sources={usageSummary} />
           ),
         )}
       </View>

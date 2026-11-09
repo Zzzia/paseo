@@ -2,12 +2,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useIsExplorerSidebarOpen } from "@/workspace-tabs/explorer-sidebar";
 import { ComposerEditingSessionsProvider } from "@/composer/editing-session";
+import { SheetHostScope } from "@/components/ui/isolated-bottom-sheet-modal";
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
 import { LucideProvider } from "lucide-react-native";
 import * as Linking from "expo-linking";
-import * as Notifications from "expo-notifications";
 import { Stack, useNavigationContainerRef, usePathname, useRouter } from "expo-router";
 import {
   createContext,
@@ -35,6 +35,7 @@ import { WorktreeSetupCalloutSource } from "@/components/worktree-setup-callout-
 import { QuittingOverlay } from "@/components/quitting-overlay";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { ChangelogHost } from "@/changelog";
+import { OnboardingHost, useIsSetupDecisionPending } from "@/onboarding";
 import { AppDiagnosticHost } from "@/components/app-diagnostic-host";
 import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
 import { LeftSidebar } from "@/components/left-sidebar";
@@ -50,11 +51,7 @@ import { WorkspaceShortcutTargetsSubscriber } from "@/components/workspace-short
 import { FloatingPanelPortalHost } from "@/components/ui/floating-panel-portal";
 import { HostChooserModal, useHostChooser } from "@/hosts/host-chooser";
 import { HostConfirmationSheet } from "@/hosts/host-confirmation-sheet";
-import {
-  getIsElectronRuntime,
-  HEADER_INNER_HEIGHT,
-  useIsCompactFormFactor,
-} from "@/constants/layout";
+import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
 import {
   canDesktopAppSidebarShare,
   resolveDesktopAppChromeLayout,
@@ -78,6 +75,7 @@ import {
   type StartupBlocker,
 } from "@/navigation/host-runtime-bootstrap";
 import { registerWorkspaceRouteNavigationRef } from "@/navigation/workspace-route-navigation";
+import { useSettingsRouteEntry } from "@/navigation/settings-presentation";
 import { ThemedStack } from "@/navigation/themed-stack";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { AgentNavigationListener } from "@/desktop/agent-navigation";
@@ -98,7 +96,6 @@ import { KeyboardShiftProvider } from "@/keyboard/shift";
 import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
-import { useStableEvent } from "@/hooks/use-stable-event";
 import { useOpenAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelsProvider, useIsMobilePanelActive } from "@/mobile-panels/provider";
 import {
@@ -133,14 +130,9 @@ import {
   parseHostWorkspaceRouteFromPathname,
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
-import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
-import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { PluginCatalogSync } from "@/plugins";
-import {
-  ensureOsNotificationPermission,
-  WEB_NOTIFICATION_CLICK_EVENT,
-  type WebNotificationClickDetail,
-} from "@/utils/os-notifications";
+import { NotificationOpenRouter } from "@/notification-open/react";
+import { ensureOsNotificationPermission } from "@/utils/os-notifications";
 
 polyfillCrypto();
 
@@ -148,6 +140,7 @@ export interface HostRuntimeBootstrapState {
   splashError: string | null;
   retry: () => void;
   hasGivenUpWaitingForHost: boolean;
+  isWaitingForSetup: boolean;
   storeReady: boolean;
   startupBlocker: StartupBlocker;
 }
@@ -156,117 +149,10 @@ const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
   splashError: null,
   retry: () => {},
   hasGivenUpWaitingForHost: false,
+  isWaitingForSetup: false,
   storeReady: false,
   startupBlocker: { kind: "none" },
 });
-
-function PushNotificationRouter() {
-  const router = useRouter();
-  const lastHandledIdRef = useRef<string | null>(null);
-  const openNotification = useStableEvent((data: Record<string, unknown> | undefined) => {
-    const target = resolveNotificationTarget(data);
-    const serverId = target.serverId;
-    const workspaceId = target.workspaceId;
-    const agentId = target.agentId;
-    if (serverId && workspaceId && agentId) {
-      navigateToAgent({ serverId, workspaceId, agentId, pin: true });
-      return;
-    }
-
-    router.navigate(buildNotificationRoute(data));
-  });
-
-  useEffect(() => {
-    if (isWeb) {
-      let removeDesktopNotificationListener: (() => void) | null = null;
-      let cancelled = false;
-
-      if (getIsElectronRuntime()) {
-        void ensureOsNotificationPermission();
-
-        const unlistenResult = getDesktopHost()?.events?.on?.(
-          "notification-click",
-          (payload: unknown) => {
-            const data =
-              typeof payload === "object" &&
-              payload !== null &&
-              "data" in payload &&
-              typeof (payload as { data?: unknown }).data === "object" &&
-              (payload as { data?: unknown }).data !== null
-                ? (payload as { data: Record<string, unknown> }).data
-                : undefined;
-            openNotification(data);
-          },
-        );
-
-        void Promise.resolve(unlistenResult).then((unlisten) => {
-          if (typeof unlisten !== "function") {
-            return;
-          }
-          if (cancelled) {
-            unlisten();
-            return;
-          }
-          removeDesktopNotificationListener = unlisten;
-          return;
-        });
-      }
-
-      const openFromWebClick = (event: Event) => {
-        const customEvent = event as CustomEvent<WebNotificationClickDetail>;
-        event.preventDefault();
-        openNotification(customEvent.detail?.data);
-      };
-
-      window.addEventListener(WEB_NOTIFICATION_CLICK_EVENT, openFromWebClick as EventListener);
-
-      return () => {
-        cancelled = true;
-        removeDesktopNotificationListener?.();
-        window.removeEventListener(WEB_NOTIFICATION_CLICK_EVENT, openFromWebClick as EventListener);
-      };
-    }
-
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        // When the app is open, don't show OS banners.
-        shouldShowAlert: false,
-        shouldShowBanner: false,
-        shouldShowList: false,
-        shouldPlaySound: false,
-        shouldSetBadge: false,
-      }),
-    });
-
-    const openFromResponse = (response: Notifications.NotificationResponse) => {
-      const identifier = response.notification.request.identifier;
-      if (lastHandledIdRef.current === identifier) {
-        return;
-      }
-      lastHandledIdRef.current = identifier;
-
-      const data = response.notification.request.content.data as
-        | Record<string, unknown>
-        | undefined;
-      openNotification(data);
-    };
-
-    const subscription = Notifications.addNotificationResponseReceivedListener(openFromResponse);
-
-    void Notifications.getLastNotificationResponseAsync().then((response) => {
-      if (response) {
-        openFromResponse(response);
-      }
-      return;
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, [openNotification]);
-
-  return null;
-}
 
 function ManagedDaemonSession({ daemon }: { daemon: HostProfile }) {
   const client = useHostRuntimeClient(daemon.serverId);
@@ -360,6 +246,9 @@ function useDaemonStartIsRunning(): boolean {
 }
 
 const STARTUP_GIVE_UP_TIMEOUT_MS = 5_000;
+// How long the splash waits on top of host startup to learn whether setup opens. A slow host
+// lands on the home instead, and setup opens over it once it is decided.
+const STARTUP_SETUP_WAIT_TIMEOUT_MS = 3_000;
 
 async function shouldStartBuiltInDaemon(): Promise<boolean> {
   if (!shouldUseDesktopDaemon()) {
@@ -436,6 +325,23 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
     };
   }, [shouldRunGiveUpTimer]);
 
+  const isSetupDecisionPending = useIsSetupDecisionPending();
+  const [hasGivenUpWaitingForSetup, setHasGivenUpWaitingForSetup] = useState(false);
+  const isWaitingForSetup = isSetupDecisionPending && !hasGivenUpWaitingForSetup;
+  const shouldRunSetupWaitTimer = isWaitingForSetup && startupBlocker.kind === "none";
+
+  useEffect(() => {
+    if (!shouldRunSetupWaitTimer) {
+      return;
+    }
+    const handle = setTimeout(() => {
+      setHasGivenUpWaitingForSetup(true);
+    }, STARTUP_SETUP_WAIT_TIMEOUT_MS);
+    return () => {
+      clearTimeout(handle);
+    };
+  }, [shouldRunSetupWaitTimer]);
+
   const retry = useCallback(() => {
     const daemonStartService = getDaemonStartService({ store: getHostRuntimeStore() });
     void daemonStartService.startIfEnabled({ shouldStart: shouldStartBuiltInDaemon });
@@ -446,8 +352,15 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
   const storeReady = resolveStartupNavigationReady({ startupBlocker });
 
   const state = useMemo<HostRuntimeBootstrapState>(
-    () => ({ splashError, retry, hasGivenUpWaitingForHost, storeReady, startupBlocker }),
-    [splashError, retry, hasGivenUpWaitingForHost, storeReady, startupBlocker],
+    () => ({
+      splashError,
+      retry,
+      hasGivenUpWaitingForHost,
+      isWaitingForSetup,
+      storeReady,
+      startupBlocker,
+    }),
+    [splashError, retry, hasGivenUpWaitingForHost, isWaitingForSetup, storeReady, startupBlocker],
   );
 
   return (
@@ -637,12 +550,16 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
         <ChangelogHost />
         <QuittingOverlay />
       </AppearanceStyleBoundary>
+      {/* Setup changes the theme while it is open, so it stays out of the remount above. Its
+          colors are CSS variables and themed props, which update in place, and setup changes no
+          font size. */}
+      <OnboardingHost />
     </View>
   );
 
   return (
     <AppContainerLifetime compactGesturesEnabled={chromeEnabled && isCompactLayout}>
-      {surface}
+      <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
     </AppContainerLifetime>
   );
 }
@@ -893,6 +810,7 @@ function OpenProjectListener() {
 }
 
 function AppWithSidebar({ children }: { children: ReactNode }) {
+  useSettingsRouteEntry();
   const pathname = usePathname();
   const hosts = useHosts();
   const storeReady = useStoreReady();
@@ -960,6 +878,9 @@ function WorkspaceRouteNavigationBridge() {
 }
 
 function AppShell() {
+  useEffect(() => {
+    if (getDesktopHost()) void ensureOsNotificationPermission();
+  }, []);
   return (
     <MobilePanelsProvider>
       <HorizontalScrollProvider>
@@ -974,10 +895,15 @@ function AppShell() {
   );
 }
 
+function NotificationOpenBridge() {
+  const { startupBlocker } = useHostRuntimeBootstrapState();
+  return <NotificationOpenRouter startupBlocked={startupBlocker.kind !== "none"} />;
+}
+
 function RuntimeProviders({ children }: { children: ReactNode }) {
   return (
     <HostRuntimeBootstrapProvider>
-      <PushNotificationRouter />
+      <NotificationOpenBridge />
       <SidebarCalloutProvider>
         <ProvidersWrapper>{children}</ProvidersWrapper>
       </SidebarCalloutProvider>

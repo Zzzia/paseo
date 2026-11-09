@@ -18,8 +18,6 @@ import { useSidebarWorkspaceTrailing } from "@/components/sidebar/workspace-trai
 import { styles } from "./sidebar-workspace-row-styles";
 import { WorkspaceRowTrailingActions } from "./sidebar-workspace-row-trailing";
 
-function noop() {}
-
 interface WorkspaceRowBodyProps {
   workspace: SidebarWorkspaceEntry;
   selected: boolean;
@@ -81,7 +79,7 @@ export function WorkspaceRowBody({
   const trailing = useSidebarWorkspaceTrailing();
   const draggable = Boolean(drag);
   const interaction = useLongPressDragInteraction({
-    drag: drag ?? noop,
+    drag,
     menuController: null,
   });
   const {
