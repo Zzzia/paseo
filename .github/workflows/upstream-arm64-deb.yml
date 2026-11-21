@@ -1,0 +1,179 @@
+name: Upstream Ubuntu ARM64 deb
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published upstream stable tag (defaults to the latest stable release)"
+        type: string
+      publish:
+        description: "Publish the validated deb to this fork's Releases"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-arm64-deb
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: getpaseo/paseo
+
+jobs:
+  resolve:
+    if: ${{ github.repository == 'Zzzia/paseo' && (github.event_name == 'workflow_dispatch' || vars.PASEO_ARM64_AUTO_RELEASE == 'true') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Resolve a published upstream release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish }}
+        run: |
+          endpoint="repos/$UPSTREAM/releases/latest"
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            git check-ref-format "refs/tags/$REQUESTED_TAG"
+            encoded_tag=$(jq -nr --arg tag "$REQUESTED_TAG" '$tag | @uri')
+            endpoint="repos/$UPSTREAM/releases/tags/$encoded_tag"
+          fi
+          tag=$(gh api "$endpoint" --jq 'select(.draft == false and .prerelease == false and .published_at != null) | .tag_name')
+          if [[ -z "$tag" ]]; then
+            echo "::error::Expected a published stable release from $UPSTREAM."
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$tag"
+
+          if [[ "$PUBLISH" == true ]]; then
+            existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              jq -sc --arg tag "ubuntu-arm64-$tag" '[.[][] | select(.tag_name == $tag)] | first // null')
+            if [[ "$existing" != null ]]; then
+              if jq -e --arg deb "Paseo-${tag#v}-arm64.deb" \
+                '.draft == false and ([.assets[].name] | index($deb) != null and index("SHA256SUMS") != null)' \
+                <<< "$existing" >/dev/null; then
+                echo "The ARM64 deb for $tag is already published."
+                exit 0
+              fi
+              echo "::error::A release or draft already exists for $tag without the expected assets. Inspect it before publishing."
+              exit 1
+            fi
+          fi
+
+          commit=$(git ls-remote --exit-code "https://github.com/$UPSTREAM.git" "refs/tags/$tag" "refs/tags/$tag^{}" |
+            awk -v ref="refs/tags/$tag" '$2 == ref { tag = $1 } $2 == ref "^{}" { commit = $1 } END { print (commit == "" ? tag : commit) }')
+          test -n "$commit"
+          printf 'tag=%s\ncommit=%s\n' "$tag" "$commit" >> "$GITHUB_OUTPUT"
+          printf 'Building %s at %s\n' "$tag" "$commit"
+
+  build:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.tag != '' }}
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+      ONNXRUNTIME_NODE_INSTALL: skip
+      EP_GH_IGNORE_TIME: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: getpaseo/paseo
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Verify source and runner
+        shell: bash
+        run: |
+          source /etc/os-release
+          test "$ID:$VERSION_ID:$(dpkg --print-architecture)" = "ubuntu:26.04:arm64"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "v$(jq -er .version packages/desktop/package.json)" = "$TAG"
+
+      - name: Build the upstream deb
+        shell: bash
+        run: |
+          node scripts/npm-retry.mjs ci
+          npm run build:desktop -- --publish never --linux deb --arm64
+
+      - name: Verify and smoke-test the deb
+        shell: bash
+        env:
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ runner.temp }}/desktop-smoke
+        run: |
+          deb="packages/desktop/release/Paseo-${TAG#v}-arm64.deb"
+          test "$(dpkg-deb --field "$deb" Architecture)" = arm64
+          test "$(dpkg-deb --field "$deb" Version)" = "${TAG#v}"
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth "$PWD/$deb"
+          test "$(readelf -h /opt/Paseo/Paseo.bin | awk '$1 == "Machine:" { print $2 }')" = AArch64
+          node packages/desktop/e2e/linux-artifact-smoke.js packages/desktop/release enabled --installed-only
+
+          mkdir "$RUNNER_TEMP/release"
+          cp "$deb" "$RUNNER_TEMP/release/"
+          cd "$RUNNER_TEMP/release"
+          sha256sum "${deb##*/}" > SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paseo-deb-${{ needs.resolve.outputs.tag }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ failure() }}
+        with:
+          name: desktop-smoke-diagnostics
+          path: ${{ runner.temp }}/desktop-smoke
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    needs: [resolve, build]
+    if: ${{ github.event_name == 'schedule' || inputs.publish }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.resolve.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: paseo-deb-${{ needs.resolve.outputs.tag }}
+          path: ${{ runner.temp }}/release
+
+      - name: Verify upstream tag and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_dir="$RUNNER_TEMP/release"
+          deb="Paseo-${TAG#v}-arm64.deb"
+          (cd "$release_dir" && sha256sum --check SHA256SUMS)
+          git init --quiet "$RUNNER_TEMP/upstream-ref"
+          git -C "$RUNNER_TEMP/upstream-ref" fetch --depth=1 --no-tags "https://github.com/$UPSTREAM.git" "refs/tags/$TAG"
+          test "$(git -C "$RUNNER_TEMP/upstream-ref" rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_COMMIT"
+          # 区分补包标签与官方源码标签，不把上游工作流写入 fork。
+          gh release create "ubuntu-arm64-$TAG" "$release_dir/$deb" "$release_dir/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Paseo $TAG — Ubuntu 26.04 ARM64" \
+            --notes "Unofficial ARM64 Debian package built from [$UPSTREAM $TAG](https://github.com/$UPSTREAM/releases/tag/$TAG), commit \`$SOURCE_COMMIT\`. The fork tag points to the packaging workflow, not the upstream source. Installed and smoke-tested on Ubuntu 26.04 ARM64."
